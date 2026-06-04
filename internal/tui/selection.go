@@ -22,6 +22,8 @@ type SelectionModel struct {
 	Focus  int
 }
 
+const fuzzyMinScore = 0
+
 func (m *SelectionModel) Toggle(index int) {
 	if index < 0 || index >= len(m.Items) {
 		return
@@ -52,20 +54,48 @@ func (m SelectionModel) SelectedCount() int {
 }
 
 func (m SelectionModel) FilteredItems() []CommitOption {
-	query := strings.ToLower(strings.TrimSpace(m.Filter))
-	if query == "" {
-		return append([]CommitOption(nil), m.Items...)
-	}
-	labels := make([]string, 0, len(m.Items))
-	for _, item := range m.Items {
-		labels = append(labels, searchableCommitOption(item))
-	}
-	matches := fuzzy.Find(query, labels)
-	filtered := make([]CommitOption, 0, len(matches))
-	for _, match := range matches {
-		filtered = append(filtered, m.Items[match.Index])
+	indexes := fuzzyMatchIndexes(m.Filter, func() []string {
+		labels := make([]string, 0, len(m.Items))
+		for _, item := range m.Items {
+			labels = append(labels, searchableCommitOption(item))
+		}
+		return labels
+	}())
+	filtered := make([]CommitOption, 0, len(indexes))
+	for _, idx := range indexes {
+		filtered = append(filtered, m.Items[idx])
 	}
 	return filtered
+}
+
+func fuzzyMatchIndexes(query string, items []string) []int {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		indexes := make([]int, 0, len(items))
+		for i := range items {
+			indexes = append(indexes, i)
+		}
+		return indexes
+	}
+	indexes := make([]int, 0, len(items))
+	seen := make(map[int]struct{}, len(items))
+	for i, item := range items {
+		if strings.Contains(strings.ToLower(item), query) {
+			indexes = append(indexes, i)
+			seen[i] = struct{}{}
+		}
+	}
+	matches := fuzzy.Find(query, items)
+	for _, match := range matches {
+		if match.Score < fuzzyMinScore {
+			continue
+		}
+		if _, ok := seen[match.Index]; ok {
+			continue
+		}
+		indexes = append(indexes, match.Index)
+	}
+	return indexes
 }
 
 func searchableCommitOption(item CommitOption) string {

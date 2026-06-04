@@ -39,3 +39,17 @@ func TestSelectionModelFilteredItems(t *testing.T) {
 		t.Fatalf("FilteredItems() = %#v", got)
 	}
 }
+
+func TestSelectionModelFilteredItemsRejectsWeakFuzzyMatches(t *testing.T) {
+	m := SelectionModel{
+		Items: []CommitOption{
+			{SHA: "abc123", ShortSHA: "abc123", Title: "Fix login crash", Labels: []string{"bug", "mobile"}},
+			{SHA: "def456", ShortSHA: "def456", Title: "Update docs", Labels: []string{"docs"}},
+		},
+		Filter: "fx",
+	}
+	got := m.FilteredItems()
+	if len(got) != 0 {
+		t.Fatalf("FilteredItems() = %#v, want no weak fuzzy matches", got)
+	}
+}

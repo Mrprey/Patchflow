@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/sahilm/fuzzy"
 
 	"patchflow/internal/browser"
 	"patchflow/internal/config"
@@ -47,6 +47,9 @@ type Model struct {
 	history                    []string
 	loading                    bool
 	loadingMessage             string
+	loadingCommand             string
+	loadingStatus              string
+	loadingStartedAt           time.Time
 	loadingToken               int
 	Width                      int
 	Height                     int
@@ -54,6 +57,7 @@ type Model struct {
 	Remotes                    []git.Remote
 	RemoteIndex                int
 	RemoteFilter               string
+	SelectedRemote             string
 	RefOptions                 []string
 	RefIndex                   int
 	RefFilter                  string
@@ -187,6 +191,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case spinner.TickMsg:
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
+			m.loadingStatus = m.loadingRuntimeStatus()
 			persist = false
 			return m, cmd
 		case remoteOptionsLoadedMsg:
@@ -194,12 +199,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				persist = false
 				return m, nil
 			}
-			m.loading = false
-			m.loadingMessage = ""
+			m.finishLoading()
 			if msg.err != nil {
 				m.Err = msg.err
 				return m, nil
 			}
+			m.SelectedRemote = msg.remote
 			m.RefOptions = msg.options
 			m.RemoteIndex = 0
 			m.RefIndex = 0
@@ -210,8 +215,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				persist = false
 				return m, nil
 			}
-			m.loading = false
-			m.loadingMessage = ""
+			m.finishLoading()
 			if msg.err != nil {
 				m.Err = msg.err
 				return m, nil
@@ -229,8 +233,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				persist = false
 				return m, nil
 			}
-			m.loading = false
-			m.loadingMessage = ""
+			m.finishLoading()
 			if msg.err != nil {
 				m.Err = msg.err
 				return m, nil
@@ -248,8 +251,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				persist = false
 				return m, nil
 			}
-			m.loading = false
-			m.loadingMessage = ""
+			m.finishLoading()
 			if msg.err != nil {
 				m.Err = msg.err
 				return m, nil
@@ -263,8 +265,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				persist = false
 				return m, nil
 			}
-			m.loading = false
-			m.loadingMessage = ""
+			m.finishLoading()
 			if msg.err != nil {
 				m.Err = msg.err
 				return m, nil
@@ -280,8 +281,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				persist = false
 				return m, nil
 			}
-			m.loading = false
-			m.loadingMessage = ""
+			m.finishLoading()
 			m.CherryPickIndex = msg.index
 			m.CherryPickCommit = msg.commit
 			m.CherryPickErr = msg.err
@@ -293,8 +293,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				persist = false
 				return m, nil
 			}
-			m.loading = false
-			m.loadingMessage = ""
+			m.finishLoading()
 			m.CherryPickIndex = msg.index
 			m.CherryPickCommit = msg.commit
 			m.CherryPickValidationErr = msg.err
@@ -325,7 +324,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		persist = false
 		return m, nil
 	case tea.KeyMsg:
-		if m.isFilterScreen() {
+		if m.isFilterScreen() && !msg.Alt {
 			if msg.Type == tea.KeyEsc {
 				if m.currentFilter() != "" {
 					m.setCurrentFilter("")
@@ -380,7 +379,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.Err = errors.New("no git remotes found")
 					return m, nil
 				}
-				token := m.beginLoading(fmt.Sprintf("Fetching %s and loading refs...", remote))
+				m.SelectedRemote = remote
+				token := m.beginLoading(
+					fmt.Sprintf("Fetching %s and loading refs...", remote),
+					fmt.Sprintf("git fetch %s --tags --prune", remote),
+				)
 				return m, tea.Batch(m.spinner.Tick, m.loadRemoteOptionsCmd(token, remote))
 			}
 			if m.screen == "ref_select" {
@@ -389,7 +392,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				compareFrom := m.selectedRef()
-				token := m.beginLoading(fmt.Sprintf("Loading compare targets for %s...", compareFrom))
+				token := m.beginLoading(
+					fmt.Sprintf("Loading compare targets for %s...", compareFrom),
+					"git for-each-ref --format=%(refname:short) refs/heads && git tag --list",
+				)
 				return m, tea.Batch(m.spinner.Tick, m.loadCompareToOptionsCmd(token, compareFrom))
 			}
 			if m.screen == "compare_to_select" {
@@ -398,11 +404,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				compareTo := m.selectedCompareTo()
-				token := m.beginLoading(fmt.Sprintf("Loading commits from %s...%s", m.CompareFrom, compareTo))
+				token := m.beginLoading(
+					fmt.Sprintf("Loading commits from %s...%s", m.CompareFrom, compareTo),
+					fmt.Sprintf("git log --pretty=format:%%H%%x09%%h%%x09%%an%%x09%%ad%%x09%%s --date=short %s...%s", m.CompareFrom, compareTo),
+				)
 				return m, tea.Batch(m.spinner.Tick, m.loadCommitsCmd(token, m.CompareFrom, compareTo))
 			}
 			if m.screen == "commit_select" {
-				token := m.beginLoading("Loading checkout targets...")
+				token := m.beginLoading(
+					"Loading checkout targets...",
+					"git for-each-ref --format=%(refname:short) refs/heads && git tag --list",
+				)
 				return m, tea.Batch(m.spinner.Tick, m.loadCheckoutOptionsCmd(token))
 			}
 			if m.screen == "checkout_select" {
@@ -439,7 +451,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.continueAfterCheckout()
 			}
 			if m.screen == "cherry_pick_progress" {
-				token := m.beginLoading("Applying selected commits...")
+				token := m.beginLoading(
+					"Applying selected commits...",
+					"git cherry-pick <selected commits>",
+				)
 				return m, tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, 0))
 			}
 			if m.screen == "cherry_pick_conflict" {
@@ -453,7 +468,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.setScreen("cherry_pick_progress")
-				token := m.beginLoading("Applying selected commits...")
+				token := m.beginLoading(
+					"Applying selected commits...",
+					"git cherry-pick <selected commits>",
+				)
 				return m, tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, 0))
 			}
 			if m.screen == "versioning" {
@@ -589,6 +607,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case tea.KeyRunes:
+			if msg.Alt {
+				switch msg.String() {
+				case "alt+a":
+					if m.screen == "commit_select" {
+						for _, idx := range m.filteredCommitIndexes() {
+							m.Commits[idx].Selected = true
+						}
+					}
+				case "alt+d":
+					if m.screen == "commit_select" {
+						for _, idx := range m.filteredCommitIndexes() {
+							m.Commits[idx].Selected = false
+						}
+					}
+				}
+				return m, nil
+			}
 			switch msg.String() {
 			case "e":
 				if m.screen == "versioning" || m.screen == "cherry_pick_validation" {
@@ -638,7 +673,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 					m.setScreen("cherry_pick_progress")
-					token := m.beginLoading("Applying selected commits...")
+					token := m.beginLoading(
+						"Applying selected commits...",
+						"git cherry-pick <selected commits>",
+					)
 					return m, tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, 0))
 				}
 				if m.screen == "cherry_pick_validation" {
@@ -656,7 +694,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 					m.setScreen("cherry_pick_progress")
-					token := m.beginLoading("Applying selected commits...")
+					token := m.beginLoading(
+						"Applying selected commits...",
+						"git cherry-pick <selected commits>",
+					)
 					return m, tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, 0))
 				}
 			case "a":
@@ -747,7 +788,7 @@ func (m Model) View() string {
 		if len(m.RefOptions) == 0 {
 			return renderScreen(
 				"Select compare base",
-				m.listSubtitle(fmt.Sprintf("Remote: %s", m.selectedRemote()), m.RefFilter),
+				m.listSubtitle(fmt.Sprintf("Remote: %s", m.compareRemoteName()), m.RefFilter),
 				"No compare refs found.",
 				[]string{"ctrl+c  quit"},
 			)
@@ -756,7 +797,7 @@ func (m Model) View() string {
 		if len(filtered) == 0 {
 			return renderScreen(
 				"Select compare base",
-				m.listSubtitle(fmt.Sprintf("Remote: %s", m.selectedRemote()), m.RefFilter),
+				m.listSubtitle(fmt.Sprintf("Remote: %s", m.compareRemoteName()), m.RefFilter),
 				"No compare refs match the current filter.",
 				[]string{"type  filter", "esc  clear", "ctrl+c  quit"},
 			)
@@ -768,7 +809,7 @@ func (m Model) View() string {
 		}
 		return renderScreen(
 			"Select compare base",
-			m.listSubtitle(fmt.Sprintf("Remote: %s", m.selectedRemote()), m.RefFilter),
+			m.listSubtitle(fmt.Sprintf("Remote: %s", m.compareRemoteName()), m.RefFilter),
 			m.renderVisibleRows(rows, focus),
 			[]string{"↑↓  move", "enter  continue", "type  filter", "ctrl+c  quit"},
 		)
@@ -838,7 +879,7 @@ func (m Model) View() string {
 			"Select commits",
 			fmt.Sprintf("Selected: %d/%d\n%s", m.selectedCommitCount(), len(m.Commits), filterText),
 			m.renderVisibleRows(rows, focus),
-			[]string{"space  toggle", "ctrl+a  all", "ctrl+d  none", "shift+↑/↓  range", "ctrl+enter  open PR", "type  filter", "enter  continue", "ctrl+c  quit"},
+			[]string{"space  toggle", "ctrl+a  all", "ctrl+d  none", "alt+a  visible all", "alt+d  visible none", "shift+↑/↓  range", "ctrl+enter  open PR", "type  filter", "enter  continue", "ctrl+c  quit"},
 		)
 	case "checkout_select":
 		if len(m.CheckoutOptions) == 0 {
@@ -983,12 +1024,33 @@ func (m Model) View() string {
 }
 
 func (m Model) renderLoadingView() string {
+	parts := []string{strings.TrimSpace(m.spinner.View())}
+	if strings.TrimSpace(m.loadingMessage) != "" {
+		parts = append(parts, m.loadingMessage)
+	}
+	if strings.TrimSpace(m.loadingStatus) != "" {
+		parts = append(parts, MutedStyle.Render(m.loadingStatus))
+	}
+	parts = append(parts, renderCompactTerminal("Command", m.loadingCommand))
 	return renderScreen(
 		"Loading",
-		m.loadingMessage,
-		strings.TrimSpace(m.spinner.View())+"\n\nPress esc to cancel.",
+		"Press esc to cancel.",
+		strings.Join(parts, "\n\n"),
 		[]string{"esc  back", "ctrl+c  quit"},
 	)
+}
+
+func renderCompactTerminal(title, command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		command = "(idle)"
+	}
+	lines := []string{
+		SectionStyle.Render(title),
+		"",
+		command,
+	}
+	return PanelStyle.Render(strings.Join(lines, "\n"))
 }
 
 func newLoadingSpinner() spinner.Model {
@@ -997,9 +1059,12 @@ func newLoadingSpinner() spinner.Model {
 	return s
 }
 
-func (m *Model) beginLoading(message string) int {
+func (m *Model) beginLoading(message, command string) int {
 	m.loading = true
 	m.loadingMessage = message
+	m.loadingCommand = command
+	m.loadingStatus = "Starting..."
+	m.loadingStartedAt = time.Now()
 	m.Err = nil
 	m.spinner = newLoadingSpinner()
 	m.loadingToken++
@@ -1009,7 +1074,41 @@ func (m *Model) beginLoading(message string) int {
 func (m *Model) cancelLoading() {
 	m.loading = false
 	m.loadingMessage = ""
+	m.loadingCommand = ""
+	m.loadingStatus = ""
+	m.loadingStartedAt = time.Time{}
 	m.loadingToken++
+}
+
+func (m *Model) finishLoading() {
+	m.loading = false
+	m.loadingMessage = ""
+	m.loadingCommand = ""
+	m.loadingStatus = ""
+	m.loadingStartedAt = time.Time{}
+}
+
+func (m Model) loadingRuntimeStatus() string {
+	if !m.loading || m.loadingStartedAt.IsZero() {
+		return ""
+	}
+	return fmt.Sprintf("Running for %s", formatDuration(time.Since(m.loadingStartedAt)))
+}
+
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Minute {
+		seconds := d.Seconds()
+		if seconds < 10 {
+			return fmt.Sprintf("%.1fs", seconds)
+		}
+		return fmt.Sprintf("%ds", int(seconds))
+	}
+	minutes := int(d / time.Minute)
+	seconds := int((d % time.Minute) / time.Second)
+	return fmt.Sprintf("%dm%02ds", minutes, seconds)
 }
 
 func (m Model) loadRemoteOptionsCmd(token int, remote string) tea.Cmd {
@@ -1056,6 +1155,13 @@ func (m Model) selectedRemote() string {
 		return m.Remotes[0].Name
 	}
 	return m.Remotes[m.RemoteIndex].Name
+}
+
+func (m Model) compareRemoteName() string {
+	if strings.TrimSpace(m.SelectedRemote) != "" {
+		return m.SelectedRemote
+	}
+	return m.selectedRemote()
 }
 
 func (m Model) selectedRef() string {
@@ -1256,6 +1362,7 @@ func (m *Model) cherryPickContinueSelectedCommit() error {
 	m.markCommitBySHA(m.CherryPickCommit.SHA, "applied", false)
 	m.CherryPickErr = nil
 	m.loadingMessage = ""
+	m.loadingCommand = ""
 	m.Err = nil
 	return nil
 }
@@ -1290,7 +1397,10 @@ func (m *Model) resumeCherryPickAfterValidation() (tea.Model, tea.Cmd) {
 		return Model(*m), nil
 	}
 	m.setScreen("cherry_pick_progress")
-	token := m.beginLoading("Applying selected commits...")
+	token := m.beginLoading(
+		"Applying selected commits...",
+		"git cherry-pick <selected commits>",
+	)
 	return Model(*m), tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, m.CherryPickIndex+1))
 }
 
@@ -1302,7 +1412,10 @@ func (m *Model) continueAfterCheckout() (tea.Model, tea.Cmd) {
 		return Model(*m), nil
 	}
 	m.setScreen("cherry_pick_progress")
-	token := m.beginLoading("Applying selected commits...")
+	token := m.beginLoading(
+		"Applying selected commits...",
+		"git cherry-pick <selected commits>",
+	)
 	return Model(*m), tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, 0))
 }
 
@@ -1493,19 +1606,7 @@ func (m Model) renderVisibleRows(rows []string, focus int) string {
 }
 
 func filteredStringIndexes(items []string, query string) []int {
-	query = strings.ToLower(strings.TrimSpace(query))
-	indexes := make([]int, 0, len(items))
-	if query == "" {
-		for i := range items {
-			indexes = append(indexes, i)
-		}
-		return indexes
-	}
-	matches := fuzzy.Find(query, items)
-	for _, match := range matches {
-		indexes = append(indexes, match.Index)
-	}
-	return indexes
+	return fuzzyMatchIndexes(query, items)
 }
 
 func ensureFilteredIndex(indexes []int, current int) int {
@@ -1573,23 +1674,11 @@ func ensureCheckoutIndexMove(m *Model, delta int) int {
 }
 
 func (m Model) filteredCommitIndexes() []int {
-	query := strings.ToLower(strings.TrimSpace(m.CommitFilter))
-	indexes := make([]int, 0, len(m.Commits))
-	if query == "" {
-		for i := range m.Commits {
-			indexes = append(indexes, i)
-		}
-		return indexes
-	}
 	labels := make([]string, 0, len(m.Commits))
 	for _, commit := range m.Commits {
 		labels = append(labels, searchableCommit(commit))
 	}
-	matches := fuzzy.Find(query, labels)
-	for _, match := range matches {
-		indexes = append(indexes, match.Index)
-	}
-	return indexes
+	return fuzzyMatchIndexes(m.CommitFilter, labels)
 }
 
 func searchableCommit(commit git.Commit) string {
@@ -1871,6 +1960,7 @@ func (m Model) saveState() error {
 	state := stateSnapshot{
 		CurrentStep:     m.screen,
 		CurrentCommit:   m.currentCommitSHA(),
+		Remote:          m.SelectedRemote,
 		CompareFrom:     m.CompareFrom,
 		CompareTo:       m.CompareTo,
 		NewBranchName:   m.NewBranchName,
@@ -1897,6 +1987,7 @@ func (m Model) resolveStatePath() string {
 type stateSnapshot struct {
 	CurrentStep     string        `json:"currentStep"`
 	CurrentCommit   string        `json:"currentCommit"`
+	Remote          string        `json:"remote,omitempty"`
 	CompareFrom     string        `json:"compareFrom,omitempty"`
 	CompareTo       string        `json:"compareTo,omitempty"`
 	NewBranchName   string        `json:"newBranchName,omitempty"`

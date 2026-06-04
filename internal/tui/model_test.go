@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -104,7 +105,7 @@ func TestRemoteSelectEnterShowsLoadingBeforeRefSelect(t *testing.T) {
 	if got.ScreenName() != "remote_select" {
 		t.Fatalf("ScreenName() = %q, want remote_select while loading", got.ScreenName())
 	}
-	if view := stripANSI(got.View()); !strings.Contains(view, "loading refs") {
+	if view := stripANSI(got.View()); !strings.Contains(view, "Loading") || !strings.Contains(view, "git fetch origin --tags --prune") {
 		t.Fatalf("View() = %q", view)
 	}
 }
@@ -126,7 +127,7 @@ func TestRefSelectEnterShowsLoadingBeforeCommitSelect(t *testing.T) {
 	if got.ScreenName() != "ref_select" {
 		t.Fatalf("ScreenName() = %q, want ref_select while loading", got.ScreenName())
 	}
-	if view := stripANSI(got.View()); !strings.Contains(view, "Loading compare targets") {
+	if view := stripANSI(got.View()); !strings.Contains(view, "Loading") || !strings.Contains(view, "git for-each-ref --format=%(refname:short) refs/heads && git tag --list") {
 		t.Fatalf("View() = %q", view)
 	}
 }
@@ -147,7 +148,27 @@ func TestCommitSelectEnterShowsLoadingBeforeCheckoutSelect(t *testing.T) {
 	if got.ScreenName() != "commit_select" {
 		t.Fatalf("ScreenName() = %q, want commit_select while loading", got.ScreenName())
 	}
-	if view := stripANSI(got.View()); !strings.Contains(view, "Loading checkout targets") {
+	if view := stripANSI(got.View()); !strings.Contains(view, "Loading") || !strings.Contains(view, "git for-each-ref --format=%(refname:short) refs/heads && git tag --list") {
+		t.Fatalf("View() = %q", view)
+	}
+}
+
+func TestLoadingViewShowsCurrentCommand(t *testing.T) {
+	m := New(Options{Config: configDefaultForTest()})
+	m.loading = true
+	m.loadingMessage = "Loading commits from upstream/main...main"
+	m.loadingCommand = "git log --pretty=format:%H%x09%h%x09%an%x09%ad%x09%s --date=short upstream/main...main"
+	m.loadingStartedAt = time.Now().Add(-3 * time.Second)
+	m.loadingStatus = m.loadingRuntimeStatus()
+
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "Loading commits from upstream/main...main") {
+		t.Fatalf("View() = %q", view)
+	}
+	if !strings.Contains(view, "Command") || !strings.Contains(view, "git log --pretty=format:%H%x09%h%x09%an%x09%ad%x09%s --date=short upstream/main...main") {
+		t.Fatalf("View() = %q", view)
+	}
+	if !strings.Contains(view, "Running for") {
 		t.Fatalf("View() = %q", view)
 	}
 }
@@ -190,11 +211,16 @@ func TestSpinnerTickWhileLoadingSchedulesNextFrame(t *testing.T) {
 	m := New(Options{Config: configDefaultForTest()})
 	m.loading = true
 	m.loadingMessage = "Loading commits..."
+	m.loadingCommand = "git log ..."
+	m.loadingStartedAt = time.Now().Add(-2 * time.Second)
 
 	next, cmd := m.Update(spinner.TickMsg{})
 	got := next.(Model)
 	if got.ScreenName() != "welcome" {
 		t.Fatalf("ScreenName() = %q, want welcome while loading", got.ScreenName())
+	}
+	if got.loadingStatus == "" || !strings.Contains(got.loadingStatus, "Running for") {
+		t.Fatalf("loadingStatus = %q, want runtime feedback", got.loadingStatus)
 	}
 	if cmd == nil {
 		t.Fatalf("cmd = nil, want next spinner tick")
@@ -438,8 +464,14 @@ func TestRemoteSelectLoadsRealRefsAndAdvancesToRefSelect(t *testing.T) {
 	if got.ScreenName() != "ref_select" {
 		t.Fatalf("ScreenName() = %q, want ref_select", got.ScreenName())
 	}
+	if got.SelectedRemote != "upstream" {
+		t.Fatalf("SelectedRemote = %q, want upstream", got.SelectedRemote)
+	}
 	if len(got.RefOptions) != 4 || got.RefOptions[0] != "upstream/main" || got.RefOptions[1] != "upstream/release/1.2.0" || got.RefOptions[2] != "v1.2.0" || got.RefOptions[3] != "v1.2.1" {
 		t.Fatalf("RefOptions = %#v", got.RefOptions)
+	}
+	if view := stripANSI(got.View()); !strings.Contains(view, "Remote: upstream") {
+		t.Fatalf("View() = %q", view)
 	}
 	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %#v", runner.calls)
@@ -501,6 +533,23 @@ func TestCommitSelectShowsPRMetadata(t *testing.T) {
 	}
 }
 
+func TestCommitSelectFilterRejectsWeakFuzzyMatches(t *testing.T) {
+	m := New(Options{Config: configDefaultForTest()})
+	m.screen = "commit_select"
+	m.Commits = []git.Commit{
+		{ShortSHA: "short1", Title: "Fix login crash"},
+		{ShortSHA: "short2", Title: "Update docs"},
+	}
+	m.CommitFilter = "fx"
+
+	if got := m.filteredCommitIndexes(); len(got) != 0 {
+		t.Fatalf("filteredCommitIndexes() = %#v, want no weak fuzzy matches", got)
+	}
+	if view := stripANSI(m.View()); !strings.Contains(view, "No commits match the current filter.") {
+		t.Fatalf("View() = %q", view)
+	}
+}
+
 func TestCommitSelectTogglesAndBulkSelects(t *testing.T) {
 	m := New(Options{Config: configDefaultForTest()})
 	m.screen = "commit_select"
@@ -525,6 +574,35 @@ func TestCommitSelectTogglesAndBulkSelects(t *testing.T) {
 	got = next.(Model)
 	if got.Commits[0].Selected || got.Commits[1].Selected {
 		t.Fatalf("Commits = %#v", got.Commits)
+	}
+}
+
+func TestCommitSelectAltAffectsOnlyFilteredCommits(t *testing.T) {
+	m := New(Options{Config: configDefaultForTest()})
+	m.screen = "commit_select"
+	m.Commits = []git.Commit{
+		{ShortSHA: "short1", Title: "Fix login", Selected: true},
+		{ShortSHA: "short2", Title: "Update docs", Selected: true},
+		{ShortSHA: "short3", Title: "Fix logout", Selected: true},
+	}
+	m.CommitFilter = "Fix"
+
+	next, _ := m.Update(keyMsgAltD())
+	got := next.(Model)
+	if !got.Commits[1].Selected {
+		t.Fatalf("Commits = %#v, want docs item still selected", got.Commits)
+	}
+	if got.Commits[0].Selected || got.Commits[2].Selected {
+		t.Fatalf("Commits = %#v, want only filtered items cleared", got.Commits)
+	}
+
+	next, _ = got.Update(keyMsgAltA())
+	got = next.(Model)
+	if !got.Commits[0].Selected || !got.Commits[2].Selected {
+		t.Fatalf("Commits = %#v, want filtered items selected again", got.Commits)
+	}
+	if !got.Commits[1].Selected {
+		t.Fatalf("Commits = %#v, want unfiltered item unchanged", got.Commits)
 	}
 }
 
@@ -1104,6 +1182,14 @@ func keyMsgShiftDown() tea.KeyMsg {
 
 func keyMsgCtrlEnter() tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ctrl+enter")}
+}
+
+func keyMsgAltA() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a"), Alt: true}
+}
+
+func keyMsgAltD() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d"), Alt: true}
 }
 
 func keyMsgRune(value string) tea.KeyMsg {
