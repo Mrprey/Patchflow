@@ -1,9 +1,0 @@
-$ git checkout main
-Already on 'main'
-M	.patchflow/state.json
-M	internal/app/app.go
-M	internal/tui/model.go
-M	internal/tui/model_test.go
-Seu ramo está à frente de 'origin/main' por 1 submissão.
-  (use "git push" to publish your local commits)
-

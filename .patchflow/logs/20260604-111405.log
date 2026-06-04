@@ -1,3 +1,0 @@
-$ git checkout release/1.2.0
-error: pathspec 'release/1.2.0' did not match any file(s) known to git
-

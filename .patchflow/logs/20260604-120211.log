@@ -1,3 +1,0 @@
-$ gh release create v1.2.2-Test --target main --title v1.2.2-Test --notes-file .patchflow/release-notes.md --draft
-https://github.com/Mrprey/Patchflow/releases/tag/untagged-ca4e25cb4ebbbe17094c
-

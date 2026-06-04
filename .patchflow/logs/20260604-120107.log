@@ -1,6 +1,0 @@
-$ git checkout v1.2.1
-error: Your local changes to the following files would be overwritten by checkout:
-	.patchflow/state.json
-Please commit your changes or stash them before you switch branches.
-Aborting
-

@@ -1,3 +1,0 @@
-$ git checkout -b release/1.2.1 v1.2.0
-fatal: 'v1.2.0' is not a commit and a branch 'release/1.2.1' cannot be created from it
-
