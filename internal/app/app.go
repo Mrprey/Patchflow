@@ -70,7 +70,7 @@ func (a *App) Run(ctx context.Context) error {
 	if a.errOut == nil {
 		a.errOut = os.Stderr
 	}
-	cfg, err := config.Load(a.cfgPath)
+	cfg, err := config.Load(a.configPath())
 	if err != nil {
 		return err
 	}
@@ -217,4 +217,14 @@ func (a *App) resolvePath(parts ...string) string {
 		return filepath.Join(append([]string{a.workDir}, all...)...)
 	}
 	return filepath.Join(all...)
+}
+
+func (a *App) configPath() string {
+	if a.cfgPath == "" {
+		return ""
+	}
+	if filepath.IsAbs(a.cfgPath) || a.workDir == "" {
+		return a.cfgPath
+	}
+	return filepath.Join(a.workDir, a.cfgPath)
 }

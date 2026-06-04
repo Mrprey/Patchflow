@@ -46,7 +46,7 @@ func TestViewShowsWelcomeAndRemoteSelect(t *testing.T) {
 		t.Fatalf("View() = %q", view)
 	}
 	m.screen = "remote_select"
-	if view := stripANSI(m.View()); !strings.Contains(view, "Select remote") || !strings.Contains(view, "No remotes found.") || !strings.Contains(view, "q  quit") {
+	if view := stripANSI(m.View()); !strings.Contains(view, "Select remote") || !strings.Contains(view, "No remotes found.") || !strings.Contains(view, "ctrl+c  quit") {
 		t.Fatalf("View() = %q", view)
 	}
 }
@@ -168,10 +168,19 @@ func TestEscCancelsLoadingAndKeepsOriginScreen(t *testing.T) {
 	}
 }
 
-func TestRuneQQuitsFromNormalScreens(t *testing.T) {
+func TestRuneQDoesNotQuitFromNormalScreens(t *testing.T) {
 	m := New(Options{Config: configDefaultForTest()})
 
 	_, cmd := m.Update(keyMsgRune("q"))
+	if cmd != nil {
+		t.Fatalf("cmd = %v, want nil", cmd)
+	}
+}
+
+func TestCtrlCQuitsFromNormalScreens(t *testing.T) {
+	m := New(Options{Config: configDefaultForTest()})
+
+	_, cmd := m.Update(keyMsgCtrlC())
 	if cmd == nil {
 		t.Fatal("cmd = nil, want quit")
 	}
@@ -360,7 +369,7 @@ func TestRefSelectMovesAndChoosesBase(t *testing.T) {
 	if len(got.Commits) != 1 || got.Commits[0].ShortSHA != "short1" {
 		t.Fatalf("Commits = %#v", got.Commits)
 	}
-	if len(runner.calls) != 2 {
+	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 }
@@ -557,29 +566,7 @@ func TestCommitSelectCtrlEnterOpensFocusedPR(t *testing.T) {
 	}
 }
 
-func TestCommitSelectOOpensFocusedPR(t *testing.T) {
-	browserCalls := []string{}
-	m := New(Options{
-		Config: configDefaultForTest(),
-		Browser: fakeBrowser{open: func(_ context.Context, url string) error {
-			browserCalls = append(browserCalls, url)
-			return nil
-		}},
-	})
-	m.screen = "commit_select"
-	m.Commits = []git.Commit{{ShortSHA: "short1", Title: "Fix login", PRURL: "https://github.com/owner/repo/pull/123"}}
-
-	next, _ := m.Update(keyMsgO())
-	got := next.(Model)
-	if got.ScreenName() != "commit_select" {
-		t.Fatalf("ScreenName() = %q, want commit_select", got.ScreenName())
-	}
-	if len(browserCalls) != 1 {
-		t.Fatalf("browserCalls = %#v", browserCalls)
-	}
-}
-
-func TestCommitSelectFiltersAndExitsFilterMode(t *testing.T) {
+func TestCommitSelectFiltersByTypingAndEscClearsFilter(t *testing.T) {
 	m := New(Options{Config: configDefaultForTest()})
 	m.screen = "commit_select"
 	m.Commits = []git.Commit{
@@ -588,22 +575,51 @@ func TestCommitSelectFiltersAndExitsFilterMode(t *testing.T) {
 		{ShortSHA: "short3", Title: "Fix logout"},
 	}
 
-	next, _ := m.Update(keyMsgCtrlF())
+	next, _ := m.Update(keyMsgRune("login"))
 	got := next.(Model)
-	if !got.CommitFiltering {
-		t.Fatal("CommitFiltering = false, want true")
-	}
-
-	next, _ = got.Update(keyMsgRune("login"))
-	got = next.(Model)
 	if len(got.filteredCommitIndexes()) != 1 {
 		t.Fatalf("filteredCommitIndexes = %#v", got.filteredCommitIndexes())
 	}
 
 	next, _ = got.Update(keyMsgEsc())
 	got = next.(Model)
-	if got.CommitFiltering {
-		t.Fatal("CommitFiltering = true, want false")
+	if got.CommitFilter != "" {
+		t.Fatalf("CommitFilter = %q, want empty", got.CommitFilter)
+	}
+}
+
+func TestRemoteSelectFiltersByTyping(t *testing.T) {
+	m := New(Options{Config: configDefaultForTest()})
+	m.screen = "remote_select"
+	m.Remotes = []git.Remote{{Name: "origin"}, {Name: "upstream"}}
+	m.Height = 12
+
+	next, _ := m.Update(keyMsgRune("up"))
+	got := next.(Model)
+	if got.RemoteFilter != "up" {
+		t.Fatalf("RemoteFilter = %q, want %q", got.RemoteFilter, "up")
+	}
+	if got.RemoteIndex != 1 {
+		t.Fatalf("RemoteIndex = %d, want 1", got.RemoteIndex)
+	}
+	view := stripANSI(got.View())
+	if !strings.Contains(view, "upstream") || strings.Contains(view, "origin") {
+		t.Fatalf("View() = %q", view)
+	}
+}
+
+func TestCommitSelectClipsLongList(t *testing.T) {
+	m := New(Options{Config: configDefaultForTest()})
+	m.screen = "commit_select"
+	m.Height = 14
+	for i := 0; i < 20; i++ {
+		m.Commits = append(m.Commits, git.Commit{ShortSHA: "short", Title: strings.Repeat("x", 4) + strings.TrimSpace(strings.Repeat(" ", i)), Selected: i == 10})
+	}
+	m.CommitIndex = 10
+
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "more above") || !strings.Contains(view, "more below") {
+		t.Fatalf("View() = %q", view)
 	}
 }
 
@@ -749,7 +765,7 @@ func TestCommitSelectLoadsCheckoutTargetsBeforeAdvancing(t *testing.T) {
 	if len(got.CheckoutOptions) != 4 || got.CheckoutOptions[0] != "main" || got.CheckoutOptions[1] != "release/1.2.0" || got.CheckoutOptions[2] != "v1.2.0" || got.CheckoutOptions[3] != "v1.2.1" {
 		t.Fatalf("CheckoutOptions = %#v", got.CheckoutOptions)
 	}
-	if len(runner.calls) != 3 {
+	if len(runner.calls) != 2 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 }
@@ -1015,7 +1031,7 @@ func TestTagSelectBlocksExistingLocalTag(t *testing.T) {
 	if got.Err == nil || !strings.Contains(got.Err.Error(), "already exists locally") {
 		t.Fatalf("Err = %v", got.Err)
 	}
-	if len(runner.calls) != 3 {
+	if len(runner.calls) != 2 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 }
@@ -1047,7 +1063,7 @@ func TestTagSelectBlocksExistingRemoteTag(t *testing.T) {
 	if got.Err == nil || !strings.Contains(got.Err.Error(), "already exists on origin") {
 		t.Fatalf("Err = %v", got.Err)
 	}
-	if len(runner.calls) != 2 {
+	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 }
@@ -1076,8 +1092,8 @@ func keyMsgCtrlD() tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyCtrlD}
 }
 
-func keyMsgCtrlF() tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyCtrlF}
+func keyMsgCtrlC() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyCtrlC}
 }
 
 func keyMsgEsc() tea.KeyMsg {
@@ -1098,10 +1114,6 @@ func keyMsgShiftDown() tea.KeyMsg {
 
 func keyMsgCtrlEnter() tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ctrl+enter")}
-}
-
-func keyMsgO() tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")}
 }
 
 func keyMsgRune(value string) tea.KeyMsg {

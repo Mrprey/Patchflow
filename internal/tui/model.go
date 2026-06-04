@@ -47,22 +47,27 @@ type Model struct {
 	loading          bool
 	loadingMessage   string
 	loadingToken     int
+	Width            int
+	Height           int
 	spinner          spinner.Model
 	Remotes          []git.Remote
 	RemoteIndex      int
+	RemoteFilter     string
 	RefOptions       []string
 	RefIndex         int
+	RefFilter        string
 	CompareFrom      string
 	CompareTo        string
 	CompareToOptions []string
 	CompareToIndex   int
+	CompareToFilter  string
 	Commits          []git.Commit
 	CommitIndex      int
 	CommitFilter     string
-	CommitFiltering  bool
 	CommitRangeAnchor int
 	CheckoutOptions  []string
 	CheckoutIndex    int
+	CheckoutFilter   string
 	CherryPickIndex  int
 	CherryPickCommit git.Commit
 	CherryPickErr    error
@@ -71,6 +76,7 @@ type Model struct {
 	CherryPickValidationErr    error
 	NewBranchName    string
 	NewBranchBase    string
+	NewBranchBaseFilter string
 	BranchName       string
 	PushRemote       string
 	TagName          string
@@ -215,7 +221,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.CommitIndex = 0
 			m.CommitRangeAnchor = 0
 			m.CommitFilter = ""
-			m.CommitFiltering = false
 			m.setScreen("commit_select")
 			return m, nil
 		case compareToOptionsLoadedMsg:
@@ -313,22 +318,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.Width = msg.Width
+		m.Height = msg.Height
+		persist = false
+		return m, nil
 	case tea.KeyMsg:
-		if msg.String() == "q" {
-			return m, tea.Quit
-		}
-		if m.screen == "commit_select" && m.CommitFiltering {
-			switch msg.Type {
-			case tea.KeyEsc:
-				m.CommitFiltering = false
-				return m, nil
-			case tea.KeyBackspace, tea.KeyDelete:
-				m.CommitFilter = deleteLastRune(m.CommitFilter)
-				m.ensureVisibleCommitFocus()
-				return m, nil
-			case tea.KeyRunes:
-				m.CommitFilter += msg.String()
-				m.ensureVisibleCommitFocus()
+		if m.isFilterScreen() {
+			if msg.Type == tea.KeyEsc {
+				if m.currentFilter() != "" {
+					m.setCurrentFilter("")
+					m.ensureVisibleFocus()
+					return m, nil
+				}
+			}
+			if msg.Type == tea.KeyBackspace || msg.Type == tea.KeyDelete {
+				if current := m.currentFilter(); current != "" {
+					m.setCurrentFilter(deleteLastRune(current))
+					m.ensureVisibleFocus()
+					return m, nil
+				}
+			}
+			if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
+				m.setCurrentFilter(m.currentFilter() + msg.String())
+				m.ensureVisibleFocus()
 				return m, nil
 			}
 		}
@@ -501,45 +514,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.screen == "commit_select" {
 				m.moveCommitFocus(-1)
 			}
-			if m.screen == "new_branch_base_select" && len(m.CheckoutOptions) > 0 {
-				m.CheckoutIndex--
-				if m.CheckoutIndex < 0 {
-					m.CheckoutIndex = len(m.CheckoutOptions) - 1
-				}
+			if m.screen == "remote_select" {
+				m.moveRemoteFocus(-1)
+			}
+			if m.screen == "ref_select" {
+				m.moveRefFocus(-1)
+			}
+			if m.screen == "compare_to_select" {
+				m.moveCompareToFocus(-1)
+			}
+			if m.screen == "checkout_select" {
+				m.moveCheckoutFocus(-1)
+			}
+			if m.screen == "new_branch_base_select" {
+				m.moveNewBranchBaseFocus(-1)
 			}
 		case tea.KeyDown:
 			if m.screen == "remote_select" && len(m.Remotes) > 0 {
-				m.RemoteIndex++
-				if m.RemoteIndex >= len(m.Remotes) {
-					m.RemoteIndex = 0
-				}
+				m.moveRemoteFocus(1)
 			}
 			if m.screen == "ref_select" && len(m.RefOptions) > 0 {
-				m.RefIndex++
-				if m.RefIndex >= len(m.RefOptions) {
-					m.RefIndex = 0
-				}
+				m.moveRefFocus(1)
 			}
 			if m.screen == "commit_select" {
 				m.moveCommitFocus(1)
 			}
-			if m.screen == "checkout_select" && len(m.CheckoutOptions) > 0 {
-				m.CheckoutIndex++
-				if m.CheckoutIndex >= len(m.CheckoutOptions) {
-					m.CheckoutIndex = 0
-				}
+			if m.screen == "checkout_select" {
+				m.moveCheckoutFocus(1)
 			}
-			if m.screen == "compare_to_select" && len(m.CompareToOptions) > 0 {
-				m.CompareToIndex++
-				if m.CompareToIndex >= len(m.CompareToOptions) {
-					m.CompareToIndex = 0
-				}
+			if m.screen == "compare_to_select" {
+				m.moveCompareToFocus(1)
 			}
-			if m.screen == "new_branch_base_select" && len(m.CheckoutOptions) > 0 {
-				m.CheckoutIndex++
-				if m.CheckoutIndex >= len(m.CheckoutOptions) {
-					m.CheckoutIndex = 0
-				}
+			if m.screen == "new_branch_base_select" {
+				m.moveNewBranchBaseFocus(1)
 			}
 		case tea.KeySpace:
 			if m.screen == "commit_select" && len(m.Commits) > 0 {
@@ -556,11 +563,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for i := range m.Commits {
 					m.Commits[i].Selected = false
 				}
-			}
-		case tea.KeyCtrlF:
-			if m.screen == "commit_select" {
-				m.CommitFiltering = true
-				return m, nil
 			}
 		case tea.KeyShiftUp:
 			if m.screen == "commit_select" {
@@ -623,23 +625,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.setScreen("release_select")
 					return m, nil
 				}
-			case "o":
-				if m.screen == "commit_select" {
-					if err := m.openFocusedPR(context.Background()); err != nil {
-						m.Err = err
-					}
-					return m, nil
-				}
-			case "f":
-				if m.screen == "commit_select" {
-					m.CommitFiltering = true
-					return m, nil
-				}
-			case "v":
-				if m.screen == "commit_select" {
-					m.selectCommitRangeToFocus()
-					return m, nil
-				}
 			case "c":
 				if m.screen == "cherry_pick_conflict" {
 					if err := m.cherryPickContinueSelectedCommit(); err != nil {
@@ -700,15 +685,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.NewBranchName += msg.String()
 				return m, nil
 			}
-			if m.screen == "commit_select" && m.CommitFiltering {
-				m.CommitFilter += msg.String()
-				m.ensureVisibleCommitFocus()
-				return m, nil
-			}
 		default:
-			if msg.String() == "q" {
-				return m, tea.Quit
-			}
 		}
 	case error:
 		m.Err = msg
@@ -722,7 +699,7 @@ func (m Model) View() string {
 			"Error",
 			"Something went wrong.",
 			renderError(m.Err),
-			[]string{"esc  back", "q  quit"},
+			[]string{"esc  back", "ctrl+c  quit"},
 		)
 	}
 	if m.loading {
@@ -734,15 +711,15 @@ func (m Model) View() string {
 			"Welcome",
 			"Press enter to start the patch flow.",
 			"Ready to inspect remotes, compare refs, and select commits.",
-			[]string{"enter  start", "q  quit"},
+			[]string{"enter  start", "ctrl+c  quit"},
 		)
 	case "remote_select":
 		if len(m.Remotes) == 0 {
 			return renderScreen(
 				"Select remote",
-				"Pick the remote to fetch before comparing refs.",
+				m.listSubtitle("Pick the remote to fetch before comparing refs.", m.RemoteFilter),
 				"No remotes found.",
-				[]string{"q  quit"},
+				[]string{"ctrl+c  quit"},
 			)
 		}
 		rows := make([]string, 0, len(m.Remotes))
@@ -751,17 +728,17 @@ func (m Model) View() string {
 		}
 		return renderScreen(
 			"Select remote",
-			"Pick the remote to fetch before comparing refs.",
-			strings.Join(rows, "\n"),
-			[]string{"↑↓  move", "enter  continue", "q  quit"},
+			m.listSubtitle("Pick the remote to fetch before comparing refs.", m.RemoteFilter),
+			m.renderVisibleRows(rows, m.RemoteIndex),
+			[]string{"↑↓  move", "enter  continue", "type  filter", "ctrl+c  quit"},
 		)
 	case "ref_select":
 		if len(m.RefOptions) == 0 {
 			return renderScreen(
 				"Select compare base",
-				fmt.Sprintf("Remote: %s", m.selectedRemote()),
+				m.listSubtitle(fmt.Sprintf("Remote: %s", m.selectedRemote()), m.RefFilter),
 				"No compare refs found.",
-				[]string{"q  quit"},
+				[]string{"ctrl+c  quit"},
 			)
 		}
 		rows := make([]string, 0, len(m.RefOptions))
@@ -770,17 +747,17 @@ func (m Model) View() string {
 		}
 		return renderScreen(
 			"Select compare base",
-			fmt.Sprintf("Remote: %s", m.selectedRemote()),
-			strings.Join(rows, "\n"),
-			[]string{"↑↓  move", "enter  continue", "q  quit"},
+			m.listSubtitle(fmt.Sprintf("Remote: %s", m.selectedRemote()), m.RefFilter),
+			m.renderVisibleRows(rows, m.RefIndex),
+			[]string{"↑↓  move", "enter  continue", "type  filter", "ctrl+c  quit"},
 		)
 	case "compare_to_select":
 		if len(m.CompareToOptions) == 0 {
 			return renderScreen(
 				"Select compare target",
-				fmt.Sprintf("Compare from: %s", m.CompareFrom),
+				m.listSubtitle(fmt.Sprintf("Compare from: %s", m.CompareFrom), m.CompareToFilter),
 				"No compare targets found.",
-				[]string{"q  quit"},
+				[]string{"ctrl+c  quit"},
 			)
 		}
 		rows := make([]string, 0, len(m.CompareToOptions))
@@ -789,26 +766,26 @@ func (m Model) View() string {
 		}
 		return renderScreen(
 			"Select compare target",
-			fmt.Sprintf("Compare from: %s", m.CompareFrom),
-			strings.Join(rows, "\n"),
-			[]string{"↑↓  move", "enter  continue", "q  quit"},
+			m.listSubtitle(fmt.Sprintf("Compare from: %s", m.CompareFrom), m.CompareToFilter),
+			m.renderVisibleRows(rows, m.CompareToIndex),
+			[]string{"↑↓  move", "enter  continue", "type  filter", "ctrl+c  quit"},
 		)
 	case "commit_select":
 		filtered := m.filteredCommitIndexes()
 		if len(m.Commits) == 0 {
 			return renderScreen(
 				"Select commits",
-				fmt.Sprintf("Selected: %d/%d", m.selectedCommitCount(), len(m.Commits)),
+				m.listSubtitle(fmt.Sprintf("Selected: %d/%d", m.selectedCommitCount(), len(m.Commits)), m.CommitFilter),
 				"No commits found.",
-				[]string{"q  quit"},
+				[]string{"ctrl+c  quit"},
 			)
 		}
 		if len(filtered) == 0 {
 			return renderScreen(
 				"Select commits",
-				fmt.Sprintf("Selected: %d/%d\nFilter: %s", m.selectedCommitCount(), len(m.Commits), m.CommitFilter),
+				m.listSubtitle(fmt.Sprintf("Selected: %d/%d", m.selectedCommitCount(), len(m.Commits)), m.CommitFilter),
 				"No commits match the current filter.",
-				[]string{"ctrl+f  filter", "esc  exit filter", "q  quit"},
+				[]string{"type  filter", "esc  clear", "ctrl+c  quit"},
 			)
 		}
 		rows := make([]string, 0, len(filtered))
@@ -822,14 +799,14 @@ func (m Model) View() string {
 			rows = append(rows, renderRow(idx == m.CommitIndex, "  "+line))
 		}
 		filterText := "Filter: (off)"
-		if strings.TrimSpace(m.CommitFilter) != "" || m.CommitFiltering {
+		if strings.TrimSpace(m.CommitFilter) != "" {
 			filterText = fmt.Sprintf("Filter: %s", m.CommitFilter)
 		}
 		return renderScreen(
 			"Select commits",
 			fmt.Sprintf("Selected: %d/%d\n%s", m.selectedCommitCount(), len(m.Commits), filterText),
-			strings.Join(rows, "\n"),
-			[]string{"space  toggle", "ctrl+a  all", "ctrl+d  none", "ctrl+f  filter", "shift+↑/↓  range", "v  range", "ctrl+enter  open PR", "o  open PR", "enter  continue"},
+			m.renderVisibleRows(rows, m.CommitIndex),
+			[]string{"space  toggle", "ctrl+a  all", "ctrl+d  none", "shift+↑/↓  range", "ctrl+enter  open PR", "type  filter", "enter  continue", "ctrl+c  quit"},
 		)
 	case "checkout_select":
 		if len(m.CheckoutOptions) == 0 {
@@ -837,7 +814,7 @@ func (m Model) View() string {
 				"Select checkout target",
 				"Choose the branch or tag to apply commits on.",
 				"No checkout targets found.",
-				[]string{"q  quit"},
+				[]string{"ctrl+c  quit"},
 			)
 		}
 		rows := make([]string, 0, len(m.CheckoutOptions)+1)
@@ -847,9 +824,9 @@ func (m Model) View() string {
 		rows = append(rows, renderRow(m.CheckoutIndex == len(m.CheckoutOptions), fmt.Sprintf("  %s", createNewBranchOption)))
 		return renderScreen(
 			"Select checkout target",
-			"Choose the branch or tag to apply commits on.",
-			strings.Join(rows, "\n"),
-			[]string{"↑↓  move", "enter  checkout", "n  new branch", "q  quit"},
+			m.listSubtitle("Choose the branch or tag to apply commits on.", m.CheckoutFilter),
+			m.renderVisibleRows(rows, m.CheckoutIndex),
+			[]string{"↑↓  move", "enter  checkout", "type  filter", "ctrl+c  quit"},
 		)
 	case "new_branch_base_select":
 		if len(m.CheckoutOptions) == 0 {
@@ -857,7 +834,7 @@ func (m Model) View() string {
 				"Select new branch base",
 				"No branch or tag bases found.",
 				"",
-				[]string{"q  quit"},
+				[]string{"ctrl+c  quit"},
 			)
 		}
 		rows := make([]string, 0, len(m.CheckoutOptions))
@@ -866,16 +843,16 @@ func (m Model) View() string {
 		}
 		return renderScreen(
 			"Select new branch base",
-			"Pick the branch or tag to branch from.",
-			strings.Join(rows, "\n"),
-			[]string{"↑↓  move", "enter  continue", "esc  back", "q  quit"},
+			m.listSubtitle("Pick the branch or tag to branch from.", m.NewBranchBaseFilter),
+			m.renderVisibleRows(rows, m.CheckoutIndex),
+			[]string{"↑↓  move", "enter  continue", "esc  back", "type  filter", "ctrl+c  quit"},
 		)
 	case "new_branch_name_select":
 		return renderScreen(
 			"Create branch",
 			fmt.Sprintf("Base ref: %s", m.NewBranchBase),
 			fmt.Sprintf("Branch name: %s\n\nType to edit the branch name, then press enter.", m.NewBranchName),
-			[]string{"type  edit", "backspace  delete", "enter  create", "esc  back", "q  quit"},
+			[]string{"type  edit", "backspace  delete", "enter  create", "esc  back", "ctrl+c  quit"},
 		)
 	case "cherry_pick_validation":
 		validationText := "The post cherry-pick command failed."
@@ -896,7 +873,7 @@ func (m Model) View() string {
 			"Cherry-pick",
 			"Applying selected commits to the checkout target.",
 			"Loading overlay shows the current operation while Git works.",
-			[]string{"esc  back", "q  quit"},
+			[]string{"esc  back", "ctrl+c  quit"},
 		)
 	case "cherry_pick_conflict":
 		conflictText := "The cherry-pick stopped on a conflict."
@@ -924,35 +901,35 @@ func (m Model) View() string {
 			"Push",
 			"Push the current branch to the configured remote.",
 			"Press enter to run git push.",
-			[]string{"enter  push", "esc  back", "q  quit"},
+			[]string{"enter  push", "esc  back", "ctrl+c  quit"},
 		)
 	case "tag_select":
 		return renderScreen(
 			"Tag",
 			"Create and push the release tag.",
 			fmt.Sprintf("Tag name: %s\n\nType to edit the tag name, then press enter.", m.TagName),
-			[]string{"type  edit", "backspace  delete", "enter  tag", "esc  back", "q  quit"},
+			[]string{"type  edit", "backspace  delete", "enter  tag", "esc  back", "ctrl+c  quit"},
 		)
 	case "release_select":
 		return renderScreen(
 			"Release",
 			"Generate release notes and create the GitHub draft.",
 			fmt.Sprintf("Release title: %s\nTag: %s\n\nType to edit the release title, then press enter.", m.releaseTitle(), m.TagName),
-			[]string{"type  edit", "backspace  delete", "enter  release", "esc  back", "q  quit"},
+			[]string{"type  edit", "backspace  delete", "enter  release", "esc  back", "ctrl+c  quit"},
 		)
 	case "done":
 		return renderScreen(
 			"Done",
 			"UI flow complete.",
 			"All requested steps finished.",
-			[]string{"q  quit"},
+			[]string{"ctrl+c  quit"},
 		)
 	default:
 		return renderScreen(
 			"Patchflow",
 			"",
-			"Press q to quit.",
-			[]string{"q  quit"},
+			"Press ctrl+c to quit.",
+			[]string{"ctrl+c  quit"},
 		)
 	}
 }
@@ -962,7 +939,7 @@ func (m Model) renderLoadingView() string {
 		"Loading",
 		m.loadingMessage,
 		strings.TrimSpace(m.spinner.View())+"\n\nPress esc to cancel.",
-		[]string{"esc  back", "q  quit", "ctrl+c  quit"},
+		[]string{"esc  back", "ctrl+c  quit"},
 	)
 }
 
@@ -1103,7 +1080,7 @@ func (m Model) openFocusedPR(ctx context.Context) error {
 }
 
 func (m Model) isOpenPRShortcut(msg tea.KeyMsg) bool {
-	return msg.String() == "ctrl+enter" || msg.String() == "o"
+	return msg.String() == "ctrl+enter"
 }
 
 func (m *Model) handleCheckoutEnter() error {
@@ -1322,6 +1299,224 @@ func (m *Model) handleNewBranchEnter() error {
 	}
 	m.BranchName = branch
 	return nil
+}
+
+func (m Model) isFilterScreen() bool {
+	switch m.screen {
+	case "remote_select", "ref_select", "compare_to_select", "commit_select", "checkout_select", "new_branch_base_select":
+		return true
+	default:
+		return false
+	}
+}
+
+func (m Model) currentFilter() string {
+	switch m.screen {
+	case "remote_select":
+		return m.RemoteFilter
+	case "ref_select":
+		return m.RefFilter
+	case "compare_to_select":
+		return m.CompareToFilter
+	case "commit_select":
+		return m.CommitFilter
+	case "checkout_select":
+		return m.CheckoutFilter
+	case "new_branch_base_select":
+		return m.NewBranchBaseFilter
+	default:
+		return ""
+	}
+}
+
+func (m *Model) setCurrentFilter(value string) {
+	switch m.screen {
+	case "remote_select":
+		m.RemoteFilter = value
+	case "ref_select":
+		m.RefFilter = value
+	case "compare_to_select":
+		m.CompareToFilter = value
+	case "commit_select":
+		m.CommitFilter = value
+	case "checkout_select":
+		m.CheckoutFilter = value
+	case "new_branch_base_select":
+		m.NewBranchBaseFilter = value
+	}
+}
+
+func (m *Model) ensureVisibleFocus() {
+	switch m.screen {
+	case "remote_select":
+		m.RemoteIndex = ensureFilteredIndex(filteredStringIndexes(m.remoteOptionNames(), m.RemoteFilter), m.RemoteIndex)
+	case "ref_select":
+		m.RefIndex = ensureFilteredIndex(filteredStringIndexes(m.RefOptions, m.RefFilter), m.RefIndex)
+	case "compare_to_select":
+		m.CompareToIndex = ensureFilteredIndex(filteredStringIndexes(m.CompareToOptions, m.CompareToFilter), m.CompareToIndex)
+	case "commit_select":
+		m.ensureVisibleCommitFocus()
+	case "checkout_select":
+		m.CheckoutIndex = ensureCheckoutIndex(m, m.CheckoutIndex)
+	case "new_branch_base_select":
+		m.CheckoutIndex = ensureFilteredIndex(filteredStringIndexes(m.CheckoutOptions, m.NewBranchBaseFilter), m.CheckoutIndex)
+	}
+}
+
+func (m Model) remoteOptionNames() []string {
+	names := make([]string, 0, len(m.Remotes))
+	for _, remote := range m.Remotes {
+		names = append(names, remote.Name)
+	}
+	return names
+}
+
+func (m *Model) moveRemoteFocus(delta int) {
+	indexes := filteredStringIndexes(m.remoteOptionNames(), m.RemoteFilter)
+	m.RemoteIndex = moveFilteredIndex(indexes, m.RemoteIndex, delta)
+}
+
+func (m *Model) moveRefFocus(delta int) {
+	indexes := filteredStringIndexes(m.RefOptions, m.RefFilter)
+	m.RefIndex = moveFilteredIndex(indexes, m.RefIndex, delta)
+}
+
+func (m *Model) moveCompareToFocus(delta int) {
+	indexes := filteredStringIndexes(m.CompareToOptions, m.CompareToFilter)
+	m.CompareToIndex = moveFilteredIndex(indexes, m.CompareToIndex, delta)
+}
+
+func (m *Model) moveCheckoutFocus(delta int) {
+	m.CheckoutIndex = ensureCheckoutIndexMove(m, delta)
+}
+
+func (m *Model) moveNewBranchBaseFocus(delta int) {
+	indexes := filteredStringIndexes(m.CheckoutOptions, m.NewBranchBaseFilter)
+	m.CheckoutIndex = moveFilteredIndex(indexes, m.CheckoutIndex, delta)
+}
+
+func (m Model) listSubtitle(base, filter string) string {
+	filter = strings.TrimSpace(filter)
+	if filter == "" {
+		return base
+	}
+	return fmt.Sprintf("%s\nFilter: %s", base, filter)
+}
+
+func (m Model) maxListBodyRows() int {
+	if m.Height <= 0 {
+		return 8
+	}
+	rows := m.Height - 10
+	if rows < 3 {
+		rows = 3
+	}
+	return rows
+}
+
+func (m Model) renderVisibleRows(rows []string, focus int) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	limit := m.maxListBodyRows()
+	if limit >= len(rows) {
+		return strings.Join(rows, "\n")
+	}
+	if focus < 0 || focus >= len(rows) {
+		focus = 0
+	}
+	start := focus - (limit / 2)
+	if start < 0 {
+		start = 0
+	}
+	if start+limit > len(rows) {
+		start = len(rows) - limit
+	}
+	end := start + limit
+	visible := make([]string, 0, limit+2)
+	if start > 0 {
+		visible = append(visible, renderDimRow(fmt.Sprintf("  ... %d more above", start)))
+	}
+	visible = append(visible, rows[start:end]...)
+	if end < len(rows) {
+		visible = append(visible, renderDimRow(fmt.Sprintf("  ... %d more below", len(rows)-end)))
+	}
+	return strings.Join(visible, "\n")
+}
+
+func filteredStringIndexes(items []string, query string) []int {
+	query = strings.ToLower(strings.TrimSpace(query))
+	indexes := make([]int, 0, len(items))
+	for i, item := range items {
+		if query == "" || strings.Contains(strings.ToLower(item), query) {
+			indexes = append(indexes, i)
+		}
+	}
+	return indexes
+}
+
+func ensureFilteredIndex(indexes []int, current int) int {
+	if len(indexes) == 0 {
+		return 0
+	}
+	if containsInt(indexes, current) {
+		return current
+	}
+	return indexes[0]
+}
+
+func moveFilteredIndex(indexes []int, current, delta int) int {
+	if len(indexes) == 0 {
+		return 0
+	}
+	currentPos := indexOfInt(indexes, current)
+	if currentPos < 0 {
+		currentPos = 0
+	}
+	nextPos := currentPos + delta
+	for nextPos < 0 {
+		nextPos += len(indexes)
+	}
+	nextPos %= len(indexes)
+	return indexes[nextPos]
+}
+
+func ensureCheckoutIndex(m *Model, current int) int {
+	indexes := filteredStringIndexes(m.CheckoutOptions, m.CheckoutFilter)
+	if current == len(m.CheckoutOptions) {
+		return len(m.CheckoutOptions)
+	}
+	if len(indexes) == 0 {
+		return 0
+	}
+	if containsInt(indexes, current) {
+		return current
+	}
+	return indexes[0]
+}
+
+func ensureCheckoutIndexMove(m *Model, delta int) int {
+	indexes := filteredStringIndexes(m.CheckoutOptions, m.CheckoutFilter)
+	if len(indexes) == 0 {
+		if delta >= 0 {
+			return len(m.CheckoutOptions)
+		}
+		return 0
+	}
+	if m.CheckoutIndex == len(m.CheckoutOptions) {
+		if delta < 0 {
+			return indexes[len(indexes)-1]
+		}
+		return len(m.CheckoutOptions)
+	}
+	next := moveFilteredIndex(indexes, m.CheckoutIndex, delta)
+	if delta > 0 && next == indexes[0] && m.CheckoutIndex == indexes[len(indexes)-1] {
+		return len(m.CheckoutOptions)
+	}
+	if delta < 0 && m.CheckoutIndex == len(m.CheckoutOptions) {
+		return indexes[len(indexes)-1]
+	}
+	return next
 }
 
 func (m Model) filteredCommitIndexes() []int {

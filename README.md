@@ -10,6 +10,12 @@ Patchflow is a terminal app for patch and release workflows.
 - `patchflow config`
 - `patchflow doctor`
 
+Use `--repo` to target another checkout:
+
+```bash
+patchflow --repo /path/to/other-repo start
+```
+
 ## Config
 
 Create `.patchflow.yml` in repo root.

@@ -3,10 +3,10 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
-	"path/filepath"
-	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -89,6 +89,13 @@ func TestResumePrintsCurrentStep(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "versioning") {
 		t.Fatalf("output = %q", out.String())
+	}
+}
+
+func TestConfigPathResolvesAgainstWorkDir(t *testing.T) {
+	a := New(Options{WorkDir: "/tmp/repo", Config: ".patchflow.yml"})
+	if got := a.configPath(); got != "/tmp/repo/.patchflow.yml" {
+		t.Fatalf("configPath() = %q, want /tmp/repo/.patchflow.yml", got)
 	}
 }
 

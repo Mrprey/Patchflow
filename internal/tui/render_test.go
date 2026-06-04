@@ -7,7 +7,7 @@ import (
 )
 
 func TestRenderScreenAddsAppChrome(t *testing.T) {
-	got := stripANSI(renderScreen("Select remote", "Remote: upstream", "origin\nupstream", []string{"enter  continue", "q  quit"}))
+	got := stripANSI(renderScreen("Select remote", "Remote: upstream", "origin\nupstream", []string{"enter  continue", "ctrl+c  quit"}))
 	if !strings.Contains(got, "PATCHFLOW") {
 		t.Fatalf("renderScreen() = %q, want app title", got)
 	}
@@ -17,7 +17,7 @@ func TestRenderScreenAddsAppChrome(t *testing.T) {
 	if !strings.Contains(got, "origin") || !strings.Contains(got, "upstream") {
 		t.Fatalf("renderScreen() = %q, want body", got)
 	}
-	if !strings.Contains(got, "enter  continue") || !strings.Contains(got, "q  quit") {
+	if !strings.Contains(got, "enter  continue") || !strings.Contains(got, "ctrl+c  quit") {
 		t.Fatalf("renderScreen() = %q, want footer", got)
 	}
 }
