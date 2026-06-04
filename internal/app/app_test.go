@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"path/filepath"
+	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -67,6 +69,26 @@ func TestRunTUIUsesInjectedFactory(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("factory not called")
+	}
+}
+
+func TestResumePrintsCurrentStep(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, ".patchflow", "state.json")
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(statePath, []byte(`{"currentStep":"versioning"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	var out strings.Builder
+	a := New(Options{WorkDir: dir, Stdout: &out})
+	if err := a.resume(); err != nil {
+		t.Fatalf("resume() error = %v", err)
+	}
+	if !strings.Contains(out.String(), "versioning") {
+		t.Fatalf("output = %q", out.String())
 	}
 }
 

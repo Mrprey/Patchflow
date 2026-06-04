@@ -9,8 +9,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"patchflow/internal/config"
-	"patchflow/internal/github"
 	"patchflow/internal/git"
+	"patchflow/internal/github"
 )
 
 func TestNewSetsWelcomeScreen(t *testing.T) {
@@ -41,11 +41,11 @@ func TestEnterMovesWelcomeToRemoteSelect(t *testing.T) {
 
 func TestViewShowsWelcomeAndRemoteSelect(t *testing.T) {
 	m := New(Options{Config: configDefaultForTest()})
-	if view := m.View(); view != "Patchflow\n\nPress enter to start.\n" {
+	if view := stripANSI(m.View()); !strings.Contains(view, "PATCHFLOW") || !strings.Contains(view, "Welcome") || !strings.Contains(view, "enter  start") {
 		t.Fatalf("View() = %q", view)
 	}
 	m.screen = "remote_select"
-	if view := m.View(); view != "Patchflow\n\nSelect remote:\n\n> upstream\n" {
+	if view := stripANSI(m.View()); !strings.Contains(view, "Select remote") || !strings.Contains(view, "No remotes found.") || !strings.Contains(view, "q  quit") {
 		t.Fatalf("View() = %q", view)
 	}
 }
@@ -88,7 +88,9 @@ func TestEnterShowsErrorWhenRemoteListFails(t *testing.T) {
 
 func TestRemoteSelectMovesFocusAndFetchesSelectedRemote(t *testing.T) {
 	runner := &recordingRunner{outputs: map[string]string{
-		"git fetch upstream --tags --prune": "",
+		"git fetch upstream --tags --prune":                                "",
+		"git for-each-ref --format=%(refname:short) refs/remotes/upstream": "upstream/HEAD\nupstream/main\nupstream/release/1.2.0\n",
+		"git tag --list": "v1.2.0\nv1.2.1\n",
 	}}
 	m := New(Options{
 		WorkDir: "/tmp/repo",
@@ -109,7 +111,10 @@ func TestRemoteSelectMovesFocusAndFetchesSelectedRemote(t *testing.T) {
 	if got.ScreenName() != "ref_select" {
 		t.Fatalf("ScreenName() = %q, want ref_select", got.ScreenName())
 	}
-	if len(runner.calls) != 1 || runner.calls[0] != "git fetch upstream --tags --prune" {
+	if len(got.RefOptions) != 4 || got.RefOptions[0] != "upstream/main" || got.RefOptions[1] != "upstream/release/1.2.0" || got.RefOptions[2] != "v1.2.0" || got.RefOptions[3] != "v1.2.1" {
+		t.Fatalf("RefOptions = %#v", got.RefOptions)
+	}
+	if len(runner.calls) != 3 || runner.calls[0] != "git fetch upstream --tags --prune" {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 }
@@ -119,9 +124,8 @@ func TestRefSelectShowsAvailableRefs(t *testing.T) {
 		Config: configDefaultForTest(),
 	})
 	m.screen = "ref_select"
-	m.Remotes = []git.Remote{{Name: "upstream"}}
-	m.RefOptions = []string{"upstream/master", "upstream/main", "v1.2.0"}
-	if view := m.View(); !strings.Contains(view, "upstream/master") || !strings.Contains(view, "v1.2.0") {
+	m.RefOptions = []string{"upstream/main", "upstream/release/1.2.0", "v1.2.0"}
+	if view := m.View(); !strings.Contains(view, "upstream/main") || !strings.Contains(view, "upstream/release/1.2.0") || !strings.Contains(view, "v1.2.0") {
 		t.Fatalf("View() = %q", view)
 	}
 }
@@ -129,7 +133,7 @@ func TestRefSelectShowsAvailableRefs(t *testing.T) {
 func TestRefSelectMovesAndChoosesBase(t *testing.T) {
 	m := New(Options{Config: configDefaultForTest()})
 	m.screen = "ref_select"
-	m.RefOptions = []string{"upstream/master", "upstream/main", "v1.2.0"}
+	m.RefOptions = []string{"upstream/main", "upstream/release/1.2.0", "v1.2.0"}
 
 	next, _ := m.Update(keyMsgDown())
 	got := next.(Model)
@@ -139,8 +143,8 @@ func TestRefSelectMovesAndChoosesBase(t *testing.T) {
 
 	next, _ = got.Update(keyMsgEnter())
 	got = next.(Model)
-	if got.CompareFrom != "upstream/main" {
-		t.Fatalf("CompareFrom = %q, want upstream/main", got.CompareFrom)
+	if got.CompareFrom != "upstream/release/1.2.0" {
+		t.Fatalf("CompareFrom = %q, want upstream/release/1.2.0", got.CompareFrom)
 	}
 	if got.ScreenName() != "commit_select" {
 		t.Fatalf("ScreenName() = %q, want commit_select", got.ScreenName())
@@ -170,6 +174,33 @@ func TestRefSelectLoadsCommitsIntoCommitSelect(t *testing.T) {
 		t.Fatalf("Commits = %#v", got.Commits)
 	}
 	if len(runner.calls) != 1 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+}
+
+func TestRemoteSelectLoadsRealRefsAndAdvancesToRefSelect(t *testing.T) {
+	runner := &recordingRunner{outputs: map[string]string{
+		"git fetch upstream --tags --prune":                                "",
+		"git for-each-ref --format=%(refname:short) refs/remotes/upstream": "upstream/HEAD\nupstream/main\nupstream/release/1.2.0\n",
+		"git tag --list": "v1.2.0\nv1.2.1\n",
+	}}
+	m := New(Options{
+		WorkDir: "/tmp/repo",
+		Config:  configDefaultForTest(),
+		Git:     git.NewClient(runner),
+	})
+	m.screen = "remote_select"
+	m.Remotes = []git.Remote{{Name: "upstream"}}
+
+	next, _ := m.Update(keyMsgEnter())
+	got := next.(Model)
+	if got.ScreenName() != "ref_select" {
+		t.Fatalf("ScreenName() = %q, want ref_select", got.ScreenName())
+	}
+	if len(got.RefOptions) != 4 || got.RefOptions[0] != "upstream/main" || got.RefOptions[1] != "upstream/release/1.2.0" || got.RefOptions[2] != "v1.2.0" || got.RefOptions[3] != "v1.2.1" {
+		t.Fatalf("RefOptions = %#v", got.RefOptions)
+	}
+	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 }
@@ -256,7 +287,7 @@ func TestCommitSelectEnterAdvancesToCheckoutSelect(t *testing.T) {
 func TestCommitSelectCtrlEnterOpensFocusedPR(t *testing.T) {
 	browserCalls := []string{}
 	m := New(Options{
-		Config:  configDefaultForTest(),
+		Config: configDefaultForTest(),
 		Browser: fakeBrowser{open: func(_ context.Context, url string) error {
 			browserCalls = append(browserCalls, url)
 			return nil
@@ -278,7 +309,7 @@ func TestCommitSelectCtrlEnterOpensFocusedPR(t *testing.T) {
 func TestCommitSelectOOpensFocusedPR(t *testing.T) {
 	browserCalls := []string{}
 	m := New(Options{
-		Config:  configDefaultForTest(),
+		Config: configDefaultForTest(),
 		Browser: fakeBrowser{open: func(_ context.Context, url string) error {
 			browserCalls = append(browserCalls, url)
 			return nil
@@ -300,14 +331,16 @@ func TestCommitSelectOOpensFocusedPR(t *testing.T) {
 func TestCheckoutSelectShowsTargets(t *testing.T) {
 	m := New(Options{Config: configDefaultForTest()})
 	m.screen = "checkout_select"
-	m.CheckoutOptions = []string{"release/1.2.0", "Create new branch from tag"}
-	if view := m.View(); !strings.Contains(view, "release/1.2.0") || !strings.Contains(view, "Create new branch from tag") {
+	m.CheckoutOptions = []string{"release/1.2.0", "v1.2.0"}
+	if view := m.View(); !strings.Contains(view, "release/1.2.0") || !strings.Contains(view, "v1.2.0") {
 		t.Fatalf("View() = %q", view)
 	}
 }
 
 func TestCheckoutSelectChoosesExistingBranch(t *testing.T) {
 	runner := &recordingRunner{outputs: map[string]string{
+		"git for-each-ref --format=%(refname:short) refs/heads": "main\nrelease/1.2.0\n",
+		"git tag --list":             "v1.2.0\nv1.2.1\n",
 		"git checkout release/1.2.0": "",
 	}}
 	m := New(Options{
@@ -316,7 +349,7 @@ func TestCheckoutSelectChoosesExistingBranch(t *testing.T) {
 		Git:     git.NewClient(runner),
 	})
 	m.screen = "checkout_select"
-	m.CheckoutOptions = []string{"release/1.2.0", "Create new branch from tag"}
+	m.CheckoutOptions = []string{"release/1.2.0", "v1.2.0"}
 
 	next, _ := m.Update(keyMsgEnter())
 	got := next.(Model)
@@ -326,30 +359,134 @@ func TestCheckoutSelectChoosesExistingBranch(t *testing.T) {
 	if len(runner.calls) != 1 || runner.calls[0] != "git checkout release/1.2.0" {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
+	if got.BranchName != "release/1.2.0" {
+		t.Fatalf("BranchName = %q", got.BranchName)
+	}
 }
 
-func TestCheckoutSelectCreatesNewBranch(t *testing.T) {
+func TestCommitSelectLoadsCheckoutTargetsBeforeAdvancing(t *testing.T) {
 	runner := &recordingRunner{outputs: map[string]string{
-		"git checkout -b release/1.2.1 v1.2.0": "",
+		"git for-each-ref --format=%(refname:short) refs/heads": "main\nrelease/1.2.0\n",
+		"git tag --list": "v1.2.0\nv1.2.1\n",
 	}}
 	m := New(Options{
 		WorkDir: "/tmp/repo",
 		Config:  configDefaultForTest(),
 		Git:     git.NewClient(runner),
 	})
-	m.screen = "checkout_select"
-	m.CheckoutOptions = []string{"release/1.2.0", "Create new branch from tag"}
-	m.CheckoutIndex = 1
-	m.NewBranchName = "release/1.2.1"
-	m.NewBranchBase = "v1.2.0"
+	m.screen = "commit_select"
+	m.Commits = []git.Commit{{ShortSHA: "short1", Title: "Fix login", Selected: true}}
 
 	next, _ := m.Update(keyMsgEnter())
 	got := next.(Model)
+	if got.ScreenName() != "checkout_select" {
+		t.Fatalf("ScreenName() = %q, want checkout_select", got.ScreenName())
+	}
+	if len(got.CheckoutOptions) != 4 || got.CheckoutOptions[0] != "main" || got.CheckoutOptions[1] != "release/1.2.0" || got.CheckoutOptions[2] != "v1.2.0" || got.CheckoutOptions[3] != "v1.2.1" {
+		t.Fatalf("CheckoutOptions = %#v", got.CheckoutOptions)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+}
+
+func TestCherryPickProgressAppliesSelectedCommitsAndMovesToVersioning(t *testing.T) {
+	runner := &recordingRunner{outputs: map[string]string{
+		"git cherry-pick sha1": "",
+		"git cherry-pick sha2": "",
+	}}
+	m := New(Options{
+		WorkDir: "/tmp/repo",
+		Config:  configDefaultForTest(),
+		Git:     git.NewClient(runner),
+	})
+	m.screen = "cherry_pick_progress"
+	m.Commits = []git.Commit{
+		{SHA: "sha1", ShortSHA: "short1", Title: "Fix login", Selected: true},
+		{SHA: "sha2", ShortSHA: "short2", Title: "Update docs", Selected: true},
+	}
+
+	next, _ := m.Update(keyMsgEnter())
+	got := next.(Model)
+	if got.ScreenName() != "versioning" {
+		t.Fatalf("ScreenName() = %q, want versioning", got.ScreenName())
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+}
+
+func TestVersioningKeysAndContinue(t *testing.T) {
+	runner := &recordingRunner{outputs: map[string]string{
+		"sh -c code --wait":     "",
+		"sh -c flutter analyze": "",
+	}}
+	m := New(Options{
+		WorkDir: "/tmp/repo",
+		Config: config.Config{
+			Editor:            "code --wait",
+			PostCherryPickCmd: "flutter analyze",
+		},
+		Git: git.NewClient(runner),
+	})
+	m.screen = "versioning"
+
+	next, _ := m.Update(keyMsgRune("e"))
+	got := next.(Model)
+	if got.ScreenName() != "versioning" {
+		t.Fatalf("ScreenName() = %q, want versioning", got.ScreenName())
+	}
+
+	next, _ = got.Update(keyMsgRune("r"))
+	got = next.(Model)
+	if got.ScreenName() != "versioning" {
+		t.Fatalf("ScreenName() = %q, want versioning", got.ScreenName())
+	}
+
+	next, _ = got.Update(keyMsgEnter())
+	got = next.(Model)
+	if got.ScreenName() != "push_select" {
+		t.Fatalf("ScreenName() = %q, want push_select", got.ScreenName())
+	}
+}
+
+func TestPushTagAndReleaseFlow(t *testing.T) {
+	runner := &recordingRunner{outputs: map[string]string{
+		"git push origin release/1.2.1": "",
+		"git tag -a v1.2.1 -m v1.2.1":   "",
+		"git push origin v1.2.1":        "",
+		"gh release create v1.2.1 --target release/1.2.1 --title v1.2.1 --notes-file /tmp/repo/.patchflow/release-notes.md --draft": "",
+	}}
+	m := New(Options{
+		WorkDir: "/tmp/repo",
+		Config: config.Config{
+			DefaultPushRemote: "origin",
+			ReleaseNotesFile:  "/tmp/repo/.patchflow/release-notes.md",
+		},
+		Git: git.NewClient(runner),
+	})
+	m.screen = "push_select"
+	m.BranchName = "release/1.2.1"
+	m.TagName = "v1.2.1"
+	m.ReleaseNotesPath = "/tmp/repo/.patchflow/release-notes.md"
+	m.Commits = []git.Commit{{ShortSHA: "short1", Title: "Fix login", Selected: true}}
+
+	next, _ := m.Update(keyMsgEnter())
+	got := next.(Model)
+	if got.ScreenName() != "tag_select" {
+		t.Fatalf("ScreenName() = %q, want tag_select", got.ScreenName())
+	}
+
+	next, _ = got.Update(keyMsgEnter())
+	got = next.(Model)
+	if got.ScreenName() != "release_select" {
+		t.Fatalf("ScreenName() = %q, want release_select", got.ScreenName())
+	}
+
+	next, _ = got.Update(keyMsgEnter())
+	got = next.(Model)
 	if got.ScreenName() != "done" {
 		t.Fatalf("ScreenName() = %q, want done", got.ScreenName())
-	}
-	if len(runner.calls) != 1 || runner.calls[0] != "git checkout -b release/1.2.1 v1.2.0" {
-		t.Fatalf("calls = %#v", runner.calls)
 	}
 }
 
@@ -383,6 +520,10 @@ func keyMsgCtrlEnter() tea.KeyMsg {
 
 func keyMsgO() tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")}
+}
+
+func keyMsgRune(value string) tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(value)}
 }
 
 type fakeRunner struct {

@@ -2,7 +2,12 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -34,19 +39,23 @@ type Model struct {
 	Browser    browser.Interface
 	Logger     logging.Logger
 
-	screen string
-	Remotes []git.Remote
-	RemoteIndex int
-	RefOptions []string
-	RefIndex int
-	CompareFrom string
-	Commits []git.Commit
-	CommitIndex int
-	CheckoutOptions []string
-	CheckoutIndex int
-	NewBranchName string
-	NewBranchBase string
-	Err    error
+	screen           string
+	Remotes          []git.Remote
+	RemoteIndex      int
+	RefOptions       []string
+	RefIndex         int
+	CompareFrom      string
+	Commits          []git.Commit
+	CommitIndex      int
+	CheckoutOptions  []string
+	CheckoutIndex    int
+	NewBranchName    string
+	NewBranchBase    string
+	BranchName       string
+	PushRemote       string
+	TagName          string
+	ReleaseNotesPath string
+	Err              error
 }
 
 func New(opts Options) Model {
@@ -71,9 +80,12 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	defer func() {
+		_ = m.saveState()
+	}()
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		if m.screen == "commit_select" && (msg.String() == "ctrl+enter" || msg.String() == "o") {
+		if m.screen == "commit_select" && m.isOpenPRShortcut(msg) {
 			if err := m.openFocusedPR(context.Background()); err != nil {
 				m.Err = err
 			}
@@ -91,24 +103,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.Remotes = remotes
 				m.screen = "remote_select"
-				if len(m.Remotes) == 0 {
-					m.Remotes = []git.Remote{{Name: m.Config.DefaultRemote}}
-				}
 				m.RemoteIndex = 0
 				return m, nil
 			}
 			if m.screen == "remote_select" {
 				remote := m.selectedRemote()
+				if strings.TrimSpace(remote) == "" {
+					m.Err = errors.New("no git remotes found")
+					return m, nil
+				}
 				if err := m.Git.Fetch(context.Background(), m.WorkDir, remote); err != nil {
 					m.Err = err
 					return m, nil
 				}
-				m.RefOptions = []string{remote + "/master", remote + "/main", "v1.2.0"}
+				options, err := m.loadRefOptions(context.Background(), remote)
+				if err != nil {
+					m.Err = err
+					return m, nil
+				}
+				m.RefOptions = options
 				m.screen = "ref_select"
 				m.RefIndex = 0
 				return m, nil
 			}
 			if m.screen == "ref_select" {
+				if len(m.RefOptions) == 0 {
+					m.Err = errors.New("no compare refs found")
+					return m, nil
+				}
 				m.CompareFrom = m.selectedRef()
 				commits, err := m.Git.LogRange(context.Background(), m.WorkDir, m.CompareFrom, "HEAD")
 				if err != nil {
@@ -122,16 +144,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.screen == "commit_select" {
-				m.screen = "checkout_select"
-				m.CheckoutOptions = []string{"release/1.2.0", "Create new branch from tag"}
+				options, err := m.loadCheckoutOptions(context.Background())
+				if err != nil {
+					m.Err = err
+					return m, nil
+				}
+				m.CheckoutOptions = options
 				m.CheckoutIndex = 0
+				m.screen = "checkout_select"
 				return m, nil
 			}
 			if m.screen == "checkout_select" {
-				if m.CheckoutIndex == 0 {
-					_ = m.Git.Runner
+				if err := m.handleCheckoutEnter(); err != nil {
+					m.Err = err
+					return m, nil
 				}
-				return m.handleCheckoutEnter()
+				m.screen = "done"
+				return m, nil
+			}
+			if m.screen == "cherry_pick_progress" {
+				if err := m.applySelectedCommits(); err != nil {
+					m.Err = err
+					return m, nil
+				}
+				m.screen = "versioning"
+				return m, nil
+			}
+			if m.screen == "versioning" {
+				m.screen = "push_select"
+				return m, nil
+			}
+			if m.screen == "push_select" {
+				if err := m.handlePushEnter(); err != nil {
+					m.Err = err
+					return m, nil
+				}
+				m.screen = "tag_select"
+				return m, nil
+			}
+			if m.screen == "tag_select" {
+				if err := m.handleTagEnter(); err != nil {
+					m.Err = err
+					return m, nil
+				}
+				m.screen = "release_select"
+				return m, nil
+			}
+			if m.screen == "release_select" {
+				if err := m.handleReleaseEnter(); err != nil {
+					m.Err = err
+					return m, nil
+				}
+				m.screen = "done"
+				return m, nil
 			}
 		case tea.KeyUp:
 			if m.screen == "remote_select" && len(m.Remotes) > 0 {
@@ -193,6 +258,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.Commits[i].Selected = false
 				}
 			}
+		case tea.KeyRunes:
+			switch msg.String() {
+			case "e":
+				if m.screen == "versioning" {
+					if err := m.openEditor(context.Background()); err != nil {
+						m.Err = err
+					}
+					return m, nil
+				}
+			case "r":
+				if m.screen == "versioning" {
+					if err := m.runValidation(context.Background()); err != nil {
+						m.Err = err
+					}
+					return m, nil
+				}
+			case "p":
+				if m.screen == "versioning" {
+					m.screen = "push_select"
+					return m, nil
+				}
+			case "t":
+				if m.screen == "push_select" {
+					m.screen = "tag_select"
+					return m, nil
+				}
+			case "l":
+				if m.screen == "tag_select" {
+					m.screen = "release_select"
+					return m, nil
+				}
+			case "o":
+				if m.screen == "commit_select" {
+					if err := m.openFocusedPR(context.Background()); err != nil {
+						m.Err = err
+					}
+					return m, nil
+				}
+			}
 		default:
 			if msg.String() == "q" {
 				return m, tea.Quit
@@ -207,84 +311,156 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	switch m.screen {
 	case "welcome":
-		return "Patchflow\n\nPress enter to start.\n"
+		return renderScreen(
+			"Welcome",
+			"Press enter to start the patch flow.",
+			"Ready to inspect remotes, compare refs, and select commits.",
+			[]string{"enter  start", "q  quit"},
+		)
 	case "remote_select":
-		var b strings.Builder
-		b.WriteString("Patchflow\n\nSelect remote:\n\n")
 		if len(m.Remotes) == 0 {
-			fmt.Fprintf(&b, "> %s\n", strings.TrimSpace(m.Config.DefaultRemote))
-			return b.String()
+			return renderScreen(
+				"Select remote",
+				"Pick the remote to fetch before comparing refs.",
+				"No remotes found.",
+				[]string{"q  quit"},
+			)
 		}
+		rows := make([]string, 0, len(m.Remotes))
 		for i, remote := range m.Remotes {
-			prefix := "  "
-			if i == m.RemoteIndex {
-				prefix = "> "
-			}
-			fmt.Fprintf(&b, "%s%s\n", prefix, remote.Name)
+			rows = append(rows, renderRow(i == m.RemoteIndex, fmt.Sprintf("  %s", remote.Name)))
 		}
-		return b.String()
+		return renderScreen(
+			"Select remote",
+			"Pick the remote to fetch before comparing refs.",
+			strings.Join(rows, "\n"),
+			[]string{"↑↓  move", "enter  continue", "q  quit"},
+		)
 	case "ref_select":
-		var b strings.Builder
-		fmt.Fprintf(&b, "Patchflow\n\nSelect compare base:\n\nRemote: %s\n\n", m.selectedRemote())
 		if len(m.RefOptions) == 0 {
-			b.WriteString("> upstream/master\n")
-			return b.String()
+			return renderScreen(
+				"Select compare base",
+				fmt.Sprintf("Remote: %s", m.selectedRemote()),
+				"No compare refs found.",
+				[]string{"q  quit"},
+			)
 		}
+		rows := make([]string, 0, len(m.RefOptions))
 		for i, ref := range m.RefOptions {
-			prefix := "  "
-			if i == m.RefIndex {
-				prefix = "> "
-			}
-			fmt.Fprintf(&b, "%s%s\n", prefix, ref)
+			rows = append(rows, renderRow(i == m.RefIndex, fmt.Sprintf("  %s", ref)))
 		}
-		return b.String()
+		return renderScreen(
+			"Select compare base",
+			fmt.Sprintf("Remote: %s", m.selectedRemote()),
+			strings.Join(rows, "\n"),
+			[]string{"↑↓  move", "enter  continue", "q  quit"},
+		)
 	case "commit_select":
-		var b strings.Builder
-		fmt.Fprintf(&b, "Patchflow\n\nSelect commits to cherry-pick\n\nSelected: %d/%d\n\n", m.selectedCommitCount(), len(m.Commits))
 		if len(m.Commits) == 0 {
-			b.WriteString("No commits found.\n")
-			return b.String()
+			return renderScreen(
+				"Select commits",
+				fmt.Sprintf("Selected: %d/%d", m.selectedCommitCount(), len(m.Commits)),
+				"No commits found.",
+				[]string{"q  quit"},
+			)
 		}
+		rows := make([]string, 0, len(m.Commits))
 		for i, commit := range m.Commits {
-			prefix := "  "
-			if i == m.CommitIndex {
-				prefix = "> "
-			}
-			check := "[ ]"
+			check := "☐"
 			if commit.Selected {
-				check = "[x]"
+				check = "☑"
 			}
-			fmt.Fprintf(&b, "%s%s %s %s%s%s\n", prefix, check, commit.ShortSHA, commit.Title, m.commitPRSuffix(commit), m.commitLabelSuffix(commit))
+			line := fmt.Sprintf("%s %s %s%s%s", check, commit.ShortSHA, commit.Title, m.commitPRSuffix(commit), m.commitLabelSuffix(commit))
+			rows = append(rows, renderRow(i == m.CommitIndex, "  "+line))
 		}
-		return b.String()
+		return renderScreen(
+			"Select commits",
+			fmt.Sprintf("Selected: %d/%d", m.selectedCommitCount(), len(m.Commits)),
+			strings.Join(rows, "\n"),
+			[]string{"space  toggle", "ctrl+a  all", "ctrl+d  none", "ctrl+enter  open PR", "o  open PR", "enter  continue"},
+		)
 	case "checkout_select":
-		var b strings.Builder
-		b.WriteString("Patchflow\n\nSelect checkout target:\n\n")
 		if len(m.CheckoutOptions) == 0 {
-			b.WriteString("> release/1.2.0\n")
-			return b.String()
+			return renderScreen(
+				"Select checkout target",
+				"Choose the branch or tag to apply commits on.",
+				"No checkout targets found.",
+				[]string{"q  quit"},
+			)
 		}
+		rows := make([]string, 0, len(m.CheckoutOptions))
 		for i, option := range m.CheckoutOptions {
-			prefix := "  "
-			if i == m.CheckoutIndex {
-				prefix = "> "
-			}
-			fmt.Fprintf(&b, "%s%s\n", prefix, option)
+			rows = append(rows, renderRow(i == m.CheckoutIndex, fmt.Sprintf("  %s", option)))
 		}
-		return b.String()
+		return renderScreen(
+			"Select checkout target",
+			"Choose the branch or tag to apply commits on.",
+			strings.Join(rows, "\n"),
+			[]string{"↑↓  move", "enter  checkout", "q  quit"},
+		)
+	case "cherry_pick_progress":
+		return renderScreen(
+			"Cherry-pick",
+			"Cherry-pick phase is not wired into this UI pass yet.",
+			"UI work for this stage comes next.",
+			[]string{"q  quit"},
+		)
+	case "versioning":
+		return renderScreen(
+			"Versioning",
+			"Versioning step is not wired into this UI pass yet.",
+			"Manual release bump stays out of this pass.",
+			[]string{"q  quit"},
+		)
+	case "push_select":
+		return renderScreen(
+			"Push",
+			"Push step is not wired into this UI pass yet.",
+			"Branch push UI comes later.",
+			[]string{"q  quit"},
+		)
+	case "tag_select":
+		return renderScreen(
+			"Tag",
+			"Tag step is not wired into this UI pass yet.",
+			"Tag creation UI comes later.",
+			[]string{"q  quit"},
+		)
+	case "release_select":
+		return renderScreen(
+			"Release",
+			"Release step is not wired into this UI pass yet.",
+			"Draft release UI comes later.",
+			[]string{"q  quit"},
+		)
 	case "done":
-		return "Patchflow\n\nDone.\n"
+		return renderScreen(
+			"Done",
+			"UI flow complete.",
+			"Cherry-pick phase comes next.",
+			[]string{"q  quit"},
+		)
 	default:
 		if m.Err != nil {
-			return fmt.Sprintf("Patchflow\n\nError: %v\n\nPress q to quit.\n", m.Err)
+			return renderScreen(
+				"Error",
+				"Something went wrong.",
+				renderError(m.Err),
+				[]string{"q  quit"},
+			)
 		}
-		return "Patchflow\n\nPress q to quit.\n"
+		return renderScreen(
+			"Patchflow",
+			"",
+			"Press q to quit.",
+			[]string{"q  quit"},
+		)
 	}
 }
 
 func (m Model) selectedRemote() string {
 	if len(m.Remotes) == 0 {
-		return strings.TrimSpace(m.Config.DefaultRemote)
+		return ""
 	}
 	if m.RemoteIndex < 0 || m.RemoteIndex >= len(m.Remotes) {
 		return m.Remotes[0].Name
@@ -294,7 +470,7 @@ func (m Model) selectedRemote() string {
 
 func (m Model) selectedRef() string {
 	if len(m.RefOptions) == 0 {
-		return "upstream/master"
+		return ""
 	}
 	if m.RefIndex < 0 || m.RefIndex >= len(m.RefOptions) {
 		return m.RefOptions[0]
@@ -361,36 +537,299 @@ func (m Model) openFocusedPR(ctx context.Context) error {
 	return m.Browser.Open(ctx, commit.PRURL)
 }
 
-func (m Model) handleCheckoutEnter() (tea.Model, tea.Cmd) {
+func (m Model) isOpenPRShortcut(msg tea.KeyMsg) bool {
+	return msg.String() == "ctrl+enter" || msg.String() == "o"
+}
+
+func (m *Model) handleCheckoutEnter() error {
 	target := m.selectedCheckoutOption()
-	switch target {
-	case "Create new branch from tag":
-		if m.NewBranchName == "" {
-			m.NewBranchName = "release/1.2.1"
-		}
-		if m.NewBranchBase == "" {
-			m.NewBranchBase = "v1.2.0"
-		}
-		if _, err := m.Git.Runner.Run(context.Background(), m.WorkDir, "git", "checkout", "-b", m.NewBranchName, m.NewBranchBase); err != nil {
-			m.Err = err
-			return m, nil
-		}
-	default:
-		if _, err := m.Git.Runner.Run(context.Background(), m.WorkDir, "git", "checkout", target); err != nil {
-			m.Err = err
-			return m, nil
-		}
+	if strings.TrimSpace(target) == "" {
+		return errors.New("no checkout target selected")
 	}
-	m.screen = "done"
-	return m, nil
+	if _, err := m.runLogged(context.Background(), "git", "checkout", target); err != nil {
+		return err
+	}
+	m.BranchName = target
+	return nil
 }
 
 func (m Model) selectedCheckoutOption() string {
 	if len(m.CheckoutOptions) == 0 {
-		return "release/1.2.0"
+		return ""
 	}
 	if m.CheckoutIndex < 0 || m.CheckoutIndex >= len(m.CheckoutOptions) {
 		return m.CheckoutOptions[0]
 	}
 	return m.CheckoutOptions[m.CheckoutIndex]
+}
+
+func (m Model) openEditor(ctx context.Context) error {
+	if strings.TrimSpace(m.Config.Editor) == "" {
+		return nil
+	}
+	return runShellCommand(ctx, m.Git.Runner, m.Logger, m.WorkDir, m.Config.Editor)
+}
+
+func (m Model) runValidation(ctx context.Context) error {
+	if strings.TrimSpace(m.Config.PostCherryPickCmd) == "" {
+		return nil
+	}
+	return runShellCommand(ctx, m.Git.Runner, m.Logger, m.WorkDir, m.Config.PostCherryPickCmd)
+}
+
+func (m Model) loadRefOptions(ctx context.Context, remote string) ([]string, error) {
+	branches, err := m.Git.RemoteBranches(ctx, m.WorkDir, remote)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := m.Git.Tags(ctx, m.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	return mergeUnique(branches, tags), nil
+}
+
+func (m Model) loadCheckoutOptions(ctx context.Context) ([]string, error) {
+	branches, err := m.Git.LocalBranches(ctx, m.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := m.Git.Tags(ctx, m.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	return mergeUnique(branches, tags), nil
+}
+
+func (m Model) applySelectedCommits() error {
+	for i := range m.Commits {
+		if !m.Commits[i].Selected {
+			continue
+		}
+		if _, err := m.runLogged(context.Background(), "git", "cherry-pick", m.Commits[i].SHA); err != nil {
+			return err
+		}
+		m.Commits[i].Status = "applied"
+	}
+	return nil
+}
+
+func (m *Model) handlePushEnter() error {
+	if m.PushRemote == "" {
+		m.PushRemote = "origin"
+	}
+	branch := m.BranchName
+	if branch == "" {
+		branch = m.NewBranchName
+	}
+	if branch == "" {
+		branch = m.selectedCheckoutOption()
+	}
+	_, err := m.runLogged(context.Background(), "git", "push", m.PushRemote, branch)
+	return err
+}
+
+func (m *Model) handleTagEnter() error {
+	if m.PushRemote == "" {
+		m.PushRemote = "origin"
+	}
+	if m.TagName == "" {
+		m.TagName = "v1.2.1"
+	}
+	if _, err := m.runLogged(context.Background(), "git", "tag", "-a", m.TagName, "-m", m.TagName); err != nil {
+		return err
+	}
+	branch := m.BranchName
+	if branch == "" {
+		branch = m.NewBranchName
+	}
+	if branch == "" {
+		branch = m.selectedCheckoutOption()
+	}
+	_, err := m.runLogged(context.Background(), "git", "push", m.PushRemote, m.TagName)
+	if err != nil {
+		return err
+	}
+	m.BranchName = branch
+	return nil
+}
+
+func (m *Model) handleReleaseEnter() error {
+	if m.TagName == "" {
+		m.TagName = "v1.2.1"
+	}
+	if m.ReleaseNotesPath == "" {
+		m.ReleaseNotesPath = ".patchflow/release-notes.md"
+	}
+	notes := m.releaseNotes()
+	if err := writeTextFile(m.ReleaseNotesPath, notes); err != nil {
+		return err
+	}
+	branch := m.BranchName
+	if branch == "" {
+		branch = m.NewBranchName
+	}
+	if branch == "" {
+		branch = m.selectedCheckoutOption()
+	}
+	_, err := m.runLogged(context.Background(), "gh", "release", "create", m.TagName, "--target", branch, "--title", m.TagName, "--notes-file", m.ReleaseNotesPath, "--draft")
+	return err
+}
+
+func (m Model) releaseNotes() string {
+	selected := m.selectedCommits()
+	var b strings.Builder
+	b.WriteString("## Changes\n\n")
+	for _, commit := range selected {
+		if commit.PRNumber > 0 {
+			fmt.Fprintf(&b, "- %s (#%d)", commit.Title, commit.PRNumber)
+			if len(commit.Labels) > 0 {
+				fmt.Fprintf(&b, " [%s]", strings.Join(commit.Labels, ", "))
+			}
+			b.WriteString("\n")
+			continue
+		}
+		fmt.Fprintf(&b, "- %s\n", commit.Title)
+	}
+	b.WriteString("\n## Cherry-picked commits\n\n")
+	for _, commit := range selected {
+		fmt.Fprintf(&b, "- %s %s\n", commit.ShortSHA, commit.Title)
+	}
+	return b.String()
+}
+
+func (m Model) selectedCommits() []git.Commit {
+	selected := make([]git.Commit, 0, len(m.Commits))
+	for _, commit := range m.Commits {
+		if commit.Selected {
+			selected = append(selected, commit)
+		}
+	}
+	return selected
+}
+
+func mergeUnique(lists ...[]string) []string {
+	seen := make(map[string]struct{})
+	merged := make([]string, 0)
+	for _, list := range lists {
+		for _, item := range list {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if _, ok := seen[item]; ok {
+				continue
+			}
+			seen[item] = struct{}{}
+			merged = append(merged, item)
+		}
+	}
+	return merged
+}
+
+func writeTextFile(path string, content string) error {
+	if err := ensureDir(path); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(content), 0o600)
+}
+
+func ensureDir(path string) error {
+	return os.MkdirAll(filepath.Dir(path), 0o755)
+}
+
+func (m Model) saveState() error {
+	if strings.TrimSpace(m.WorkDir) == "" {
+		return nil
+	}
+	state := stateSnapshot{
+		CurrentStep:     m.screen,
+		CurrentCommit:   m.currentCommitSHA(),
+		SelectedCommits: m.selectedStateCommits(),
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := m.resolveStatePath()
+	if err := ensureDir(path); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func (m Model) resolveStatePath() string {
+	return filepath.Join(m.WorkDir, ".patchflow", "state.json")
+}
+
+type stateSnapshot struct {
+	CurrentStep     string        `json:"currentStep"`
+	CurrentCommit   string        `json:"currentCommit"`
+	SelectedCommits []stateCommit `json:"selectedCommits"`
+}
+
+type stateCommit struct {
+	SHA      string   `json:"sha"`
+	ShortSHA string   `json:"shortSha"`
+	Title    string   `json:"title"`
+	PRNumber int      `json:"prNumber,omitempty"`
+	PRTitle  string   `json:"prTitle,omitempty"`
+	PRURL    string   `json:"prUrl,omitempty"`
+	Labels   []string `json:"labels,omitempty"`
+	Status   string   `json:"status"`
+}
+
+func (m Model) currentCommitSHA() string {
+	if len(m.Commits) == 0 || m.CommitIndex < 0 || m.CommitIndex >= len(m.Commits) {
+		return ""
+	}
+	return m.Commits[m.CommitIndex].SHA
+}
+
+func (m Model) selectedStateCommits() []stateCommit {
+	selected := make([]stateCommit, 0, len(m.Commits))
+	for _, commit := range m.Commits {
+		if !commit.Selected {
+			continue
+		}
+		selected = append(selected, stateCommit{
+			SHA:      commit.SHA,
+			ShortSHA: commit.ShortSHA,
+			Title:    commit.Title,
+			PRNumber: commit.PRNumber,
+			PRTitle:  commit.PRTitle,
+			PRURL:    commit.PRURL,
+			Labels:   append([]string(nil), commit.Labels...),
+			Status:   commit.Status,
+		})
+	}
+	return selected
+}
+
+func runShellCommand(ctx context.Context, runner interface {
+	Run(context.Context, string, string, ...string) (string, error)
+}, logger logging.Logger, dir, command string) error {
+	if strings.TrimSpace(command) == "" {
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		out, err := runner.Run(ctx, dir, "cmd", "/c", command)
+		if logger.Dir != "" {
+			_ = logger.Write("cmd /c "+command, out)
+		}
+		return err
+	}
+	out, err := runner.Run(ctx, dir, "sh", "-c", command)
+	if logger.Dir != "" {
+		_ = logger.Write("sh -c "+command, out)
+	}
+	return err
+}
+
+func (m Model) runLogged(ctx context.Context, name string, args ...string) (string, error) {
+	out, err := m.Git.Runner.Run(ctx, m.WorkDir, name, args...)
+	if m.Logger.Dir != "" {
+		_ = m.Logger.Write(strings.TrimSpace(name+" "+strings.Join(args, " ")), out)
+	}
+	return out, err
 }

@@ -21,3 +21,13 @@ func TestParseLog(t *testing.T) {
 		t.Fatalf("got = %#v", got[0])
 	}
 }
+
+func TestParseRefList(t *testing.T) {
+	got := ParseRefList("* main\nfeature/login\nrelease/1.2.0\n")
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	if got[0] != "main" || got[1] != "feature/login" || got[2] != "release/1.2.0" {
+		t.Fatalf("got = %#v", got)
+	}
+}
