@@ -106,6 +106,39 @@ func (c Client) Tags(ctx context.Context, dir string) ([]string, error) {
 	return ParseRefList(out), nil
 }
 
+func (c Client) TagExists(ctx context.Context, dir, tag string) (bool, error) {
+	if c.Runner == nil {
+		return false, nil
+	}
+	out, err := c.Runner.Run(ctx, dir, "git", "tag", "--list", tag)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
+func (c Client) RemoteTagExists(ctx context.Context, dir, remote, tag string) (bool, error) {
+	if c.Runner == nil {
+		return false, nil
+	}
+	out, err := c.Runner.Run(ctx, dir, "git", "ls-remote", "--tags", remote, tag)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
+func (c Client) BranchExists(ctx context.Context, dir, branch string) (bool, error) {
+	if c.Runner == nil {
+		return false, nil
+	}
+	out, err := c.Runner.Run(ctx, dir, "git", "branch", "--list", branch)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 func ParseRefList(output string) []string {
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	refs := make([]string, 0, len(lines))

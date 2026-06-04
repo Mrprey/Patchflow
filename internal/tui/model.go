@@ -20,6 +20,8 @@ import (
 	"patchflow/internal/logging"
 )
 
+const createNewBranchOption = "Create new branch from branch/tag"
+
 type Options struct {
 	WorkDir    string
 	ConfigPath string
@@ -51,13 +53,22 @@ type Model struct {
 	RefOptions       []string
 	RefIndex         int
 	CompareFrom      string
+	CompareTo        string
+	CompareToOptions []string
+	CompareToIndex   int
 	Commits          []git.Commit
 	CommitIndex      int
+	CommitFilter     string
+	CommitFiltering  bool
+	CommitRangeAnchor int
 	CheckoutOptions  []string
 	CheckoutIndex    int
 	CherryPickIndex  int
 	CherryPickCommit git.Commit
 	CherryPickErr    error
+	CherryPickValidationIndex int
+	CherryPickValidationCommit git.Commit
+	CherryPickValidationErr    error
 	NewBranchName    string
 	NewBranchBase    string
 	BranchName       string
@@ -92,7 +103,15 @@ type remoteOptionsLoadedMsg struct {
 type commitsLoadedMsg struct {
 	token       int
 	compareFrom string
+	compareTo   string
 	commits     []git.Commit
+	err         error
+}
+
+type compareToOptionsLoadedMsg struct {
+	token       int
+	compareFrom string
+	options     []string
 	err         error
 }
 
@@ -109,6 +128,13 @@ type cherryPickAppliedMsg struct {
 }
 
 type cherryPickConflictMsg struct {
+	token  int
+	index  int
+	commit git.Commit
+	err    error
+}
+
+type cherryPickValidationMsg struct {
 	token  int
 	index  int
 	commit git.Commit
@@ -184,9 +210,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.CompareFrom = msg.compareFrom
+			m.CompareTo = msg.compareTo
 			m.Commits = msg.commits
 			m.CommitIndex = 0
+			m.CommitRangeAnchor = 0
+			m.CommitFilter = ""
+			m.CommitFiltering = false
 			m.setScreen("commit_select")
+			return m, nil
+		case compareToOptionsLoadedMsg:
+			if msg.token != m.loadingToken {
+				persist = false
+				return m, nil
+			}
+			m.loading = false
+			m.loadingMessage = ""
+			if msg.err != nil {
+				m.Err = msg.err
+				return m, nil
+			}
+			m.CompareFrom = msg.compareFrom
+			m.CompareToOptions = msg.options
+			m.CompareToIndex = 0
+			if len(m.CompareToOptions) > 0 {
+				m.CompareTo = m.CompareToOptions[0]
+			}
+			m.setScreen("compare_to_select")
 			return m, nil
 		case checkoutOptionsLoadedMsg:
 			if msg.token != m.loadingToken {
@@ -233,6 +282,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Err = nil
 			m.setScreen("cherry_pick_conflict")
 			return m, nil
+		case cherryPickValidationMsg:
+			if msg.token != m.loadingToken {
+				persist = false
+				return m, nil
+			}
+			m.loading = false
+			m.loadingMessage = ""
+			m.CherryPickIndex = msg.index
+			m.CherryPickCommit = msg.commit
+			m.CherryPickValidationErr = msg.err
+			m.CherryPickErr = nil
+			m.Err = nil
+			m.setScreen("cherry_pick_validation")
+			return m, nil
 		case tea.KeyMsg:
 			if msg.Type == tea.KeyEsc {
 				m.cancelLoading()
@@ -253,6 +316,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if msg.String() == "q" {
 			return m, tea.Quit
+		}
+		if m.screen == "commit_select" && m.CommitFiltering {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.CommitFiltering = false
+				return m, nil
+			case tea.KeyBackspace, tea.KeyDelete:
+				m.CommitFilter = deleteLastRune(m.CommitFilter)
+				m.ensureVisibleCommitFocus()
+				return m, nil
+			case tea.KeyRunes:
+				m.CommitFilter += msg.String()
+				m.ensureVisibleCommitFocus()
+				return m, nil
+			}
 		}
 		if msg.Type == tea.KeyEsc {
 			if m.backScreen() {
@@ -297,27 +375,54 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				compareFrom := m.selectedRef()
-				token := m.beginLoading(fmt.Sprintf("Loading commits from %s...", compareFrom))
-				return m, tea.Batch(m.spinner.Tick, m.loadCommitsCmd(token, compareFrom))
+				token := m.beginLoading(fmt.Sprintf("Loading compare targets for %s...", compareFrom))
+				return m, tea.Batch(m.spinner.Tick, m.loadCompareToOptionsCmd(token, compareFrom))
+			}
+			if m.screen == "compare_to_select" {
+				if len(m.CompareToOptions) == 0 {
+					m.Err = errors.New("no compare targets found")
+					return m, nil
+				}
+				compareTo := m.selectedCompareTo()
+				token := m.beginLoading(fmt.Sprintf("Loading commits from %s...%s", m.CompareFrom, compareTo))
+				return m, tea.Batch(m.spinner.Tick, m.loadCommitsCmd(token, m.CompareFrom, compareTo))
 			}
 			if m.screen == "commit_select" {
 				token := m.beginLoading("Loading checkout targets...")
 				return m, tea.Batch(m.spinner.Tick, m.loadCheckoutOptionsCmd(token))
 			}
 			if m.screen == "checkout_select" {
+				if m.selectedCheckoutOption() == createNewBranchOption {
+					m.NewBranchBase = ""
+					m.NewBranchName = ""
+					m.Err = nil
+					m.CheckoutIndex = 0
+					m.setScreen("new_branch_base_select")
+					return m, nil
+				}
 				if err := m.handleCheckoutEnter(); err != nil {
 					m.Err = err
 					return m, nil
 				}
-				selected := m.selectedCommits()
-				if len(selected) == 0 {
-					m.Err = nil
-					m.setScreen("versioning")
+				return m.continueAfterCheckout()
+			}
+			if m.screen == "new_branch_base_select" {
+				if len(m.CheckoutOptions) == 0 {
+					m.Err = errors.New("no branch or tag bases found")
 					return m, nil
 				}
-				m.setScreen("cherry_pick_progress")
-				token := m.beginLoading("Applying selected commits...")
-				return m, tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, 0))
+				m.NewBranchBase = m.selectedCheckoutBase()
+				m.NewBranchName = ""
+				m.Err = nil
+				m.setScreen("new_branch_name_select")
+				return m, nil
+			}
+			if m.screen == "new_branch_name_select" {
+				if err := m.handleNewBranchEnter(); err != nil {
+					m.Err = err
+					return m, nil
+				}
+				return m.continueAfterCheckout()
 			}
 			if m.screen == "cherry_pick_progress" {
 				token := m.beginLoading("Applying selected commits...")
@@ -374,6 +479,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setScreen("done")
 				return m, nil
 			}
+			if m.screen == "cherry_pick_validation" {
+				m.Err = nil
+				m.CherryPickValidationErr = nil
+				m.setScreen("versioning")
+				return m, nil
+			}
 		case tea.KeyUp:
 			if m.screen == "remote_select" && len(m.Remotes) > 0 {
 				m.RemoteIndex--
@@ -387,10 +498,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.RefIndex = len(m.RefOptions) - 1
 				}
 			}
-			if m.screen == "commit_select" && len(m.Commits) > 0 {
-				m.CommitIndex--
-				if m.CommitIndex < 0 {
-					m.CommitIndex = len(m.Commits) - 1
+			if m.screen == "commit_select" {
+				m.moveCommitFocus(-1)
+			}
+			if m.screen == "new_branch_base_select" && len(m.CheckoutOptions) > 0 {
+				m.CheckoutIndex--
+				if m.CheckoutIndex < 0 {
+					m.CheckoutIndex = len(m.CheckoutOptions) - 1
 				}
 			}
 		case tea.KeyDown:
@@ -406,11 +520,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.RefIndex = 0
 				}
 			}
-			if m.screen == "commit_select" && len(m.Commits) > 0 {
-				m.CommitIndex++
-				if m.CommitIndex >= len(m.Commits) {
-					m.CommitIndex = 0
-				}
+			if m.screen == "commit_select" {
+				m.moveCommitFocus(1)
 			}
 			if m.screen == "checkout_select" && len(m.CheckoutOptions) > 0 {
 				m.CheckoutIndex++
@@ -418,9 +529,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.CheckoutIndex = 0
 				}
 			}
+			if m.screen == "compare_to_select" && len(m.CompareToOptions) > 0 {
+				m.CompareToIndex++
+				if m.CompareToIndex >= len(m.CompareToOptions) {
+					m.CompareToIndex = 0
+				}
+			}
+			if m.screen == "new_branch_base_select" && len(m.CheckoutOptions) > 0 {
+				m.CheckoutIndex++
+				if m.CheckoutIndex >= len(m.CheckoutOptions) {
+					m.CheckoutIndex = 0
+				}
+			}
 		case tea.KeySpace:
 			if m.screen == "commit_select" && len(m.Commits) > 0 {
-				m.Commits[m.CommitIndex].Selected = !m.Commits[m.CommitIndex].Selected
+				m.toggleFocusedCommit()
 			}
 		case tea.KeyCtrlA:
 			if m.screen == "commit_select" {
@@ -434,6 +557,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.Commits[i].Selected = false
 				}
 			}
+		case tea.KeyCtrlF:
+			if m.screen == "commit_select" {
+				m.CommitFiltering = true
+				return m, nil
+			}
+		case tea.KeyShiftUp:
+			if m.screen == "commit_select" {
+				m.moveCommitFocus(-1)
+				m.selectCommitRangeToFocus()
+			}
+		case tea.KeyShiftDown:
+			if m.screen == "commit_select" {
+				m.moveCommitFocus(1)
+				m.selectCommitRangeToFocus()
+			}
 		case tea.KeyBackspace, tea.KeyDelete:
 			if m.screen == "tag_select" {
 				m.TagName = deleteLastRune(m.TagName)
@@ -443,10 +581,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.ReleaseName = deleteLastRune(m.ReleaseName)
 				return m, nil
 			}
+			if m.screen == "new_branch_name_select" {
+				m.NewBranchName = deleteLastRune(m.NewBranchName)
+				return m, nil
+			}
 		case tea.KeyRunes:
 			switch msg.String() {
 			case "e":
-				if m.screen == "versioning" {
+				if m.screen == "versioning" || m.screen == "cherry_pick_validation" {
 					if err := m.openEditor(context.Background()); err != nil {
 						m.Err = err
 					}
@@ -458,6 +600,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.Err = err
 					}
 					return m, nil
+				}
+				if m.screen == "cherry_pick_validation" {
+					if err := m.runValidation(context.Background()); err != nil {
+						m.Err = err
+						return m, nil
+					}
+					return m.resumeCherryPickAfterValidation()
 				}
 			case "p":
 				if m.screen == "versioning" {
@@ -481,6 +630,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, nil
 				}
+			case "f":
+				if m.screen == "commit_select" {
+					m.CommitFiltering = true
+					return m, nil
+				}
+			case "v":
+				if m.screen == "commit_select" {
+					m.selectCommitRangeToFocus()
+					return m, nil
+				}
 			case "c":
 				if m.screen == "cherry_pick_conflict" {
 					if err := m.cherryPickContinueSelectedCommit(); err != nil {
@@ -495,6 +654,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.setScreen("cherry_pick_progress")
 					token := m.beginLoading("Applying selected commits...")
 					return m, tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, 0))
+				}
+				if m.screen == "cherry_pick_validation" {
+					return m.resumeCherryPickAfterValidation()
 				}
 			case "s":
 				if m.screen == "cherry_pick_conflict" {
@@ -519,6 +681,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, nil
 				}
+				if m.screen == "cherry_pick_validation" {
+					m.CherryPickValidationErr = nil
+					m.CherryPickErr = nil
+					m.setScreen("versioning")
+					return m, nil
+				}
 			}
 			if m.screen == "tag_select" {
 				m.TagName += msg.String()
@@ -526,6 +694,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.screen == "release_select" {
 				m.ReleaseName += msg.String()
+				return m, nil
+			}
+			if m.screen == "new_branch_name_select" {
+				m.NewBranchName += msg.String()
+				return m, nil
+			}
+			if m.screen == "commit_select" && m.CommitFiltering {
+				m.CommitFilter += msg.String()
+				m.ensureVisibleCommitFocus()
 				return m, nil
 			}
 		default:
@@ -597,7 +774,27 @@ func (m Model) View() string {
 			strings.Join(rows, "\n"),
 			[]string{"↑↓  move", "enter  continue", "q  quit"},
 		)
+	case "compare_to_select":
+		if len(m.CompareToOptions) == 0 {
+			return renderScreen(
+				"Select compare target",
+				fmt.Sprintf("Compare from: %s", m.CompareFrom),
+				"No compare targets found.",
+				[]string{"q  quit"},
+			)
+		}
+		rows := make([]string, 0, len(m.CompareToOptions))
+		for i, target := range m.CompareToOptions {
+			rows = append(rows, renderRow(i == m.CompareToIndex, fmt.Sprintf("  %s", target)))
+		}
+		return renderScreen(
+			"Select compare target",
+			fmt.Sprintf("Compare from: %s", m.CompareFrom),
+			strings.Join(rows, "\n"),
+			[]string{"↑↓  move", "enter  continue", "q  quit"},
+		)
 	case "commit_select":
+		filtered := m.filteredCommitIndexes()
 		if len(m.Commits) == 0 {
 			return renderScreen(
 				"Select commits",
@@ -606,20 +803,33 @@ func (m Model) View() string {
 				[]string{"q  quit"},
 			)
 		}
-		rows := make([]string, 0, len(m.Commits))
-		for i, commit := range m.Commits {
+		if len(filtered) == 0 {
+			return renderScreen(
+				"Select commits",
+				fmt.Sprintf("Selected: %d/%d\nFilter: %s", m.selectedCommitCount(), len(m.Commits), m.CommitFilter),
+				"No commits match the current filter.",
+				[]string{"ctrl+f  filter", "esc  exit filter", "q  quit"},
+			)
+		}
+		rows := make([]string, 0, len(filtered))
+		for _, idx := range filtered {
+			commit := m.Commits[idx]
 			check := "☐"
 			if commit.Selected {
 				check = "☑"
 			}
 			line := fmt.Sprintf("%s %s %s%s%s", check, commit.ShortSHA, commit.Title, m.commitPRSuffix(commit), m.commitLabelSuffix(commit))
-			rows = append(rows, renderRow(i == m.CommitIndex, "  "+line))
+			rows = append(rows, renderRow(idx == m.CommitIndex, "  "+line))
+		}
+		filterText := "Filter: (off)"
+		if strings.TrimSpace(m.CommitFilter) != "" || m.CommitFiltering {
+			filterText = fmt.Sprintf("Filter: %s", m.CommitFilter)
 		}
 		return renderScreen(
 			"Select commits",
-			fmt.Sprintf("Selected: %d/%d", m.selectedCommitCount(), len(m.Commits)),
+			fmt.Sprintf("Selected: %d/%d\n%s", m.selectedCommitCount(), len(m.Commits), filterText),
 			strings.Join(rows, "\n"),
-			[]string{"space  toggle", "ctrl+a  all", "ctrl+d  none", "ctrl+enter  open PR", "o  open PR", "enter  continue"},
+			[]string{"space  toggle", "ctrl+a  all", "ctrl+d  none", "ctrl+f  filter", "shift+↑/↓  range", "v  range", "ctrl+enter  open PR", "o  open PR", "enter  continue"},
 		)
 	case "checkout_select":
 		if len(m.CheckoutOptions) == 0 {
@@ -630,15 +840,56 @@ func (m Model) View() string {
 				[]string{"q  quit"},
 			)
 		}
+		rows := make([]string, 0, len(m.CheckoutOptions)+1)
+		for i, option := range m.CheckoutOptions {
+			rows = append(rows, renderRow(i == m.CheckoutIndex, fmt.Sprintf("  %s", option)))
+		}
+		rows = append(rows, renderRow(m.CheckoutIndex == len(m.CheckoutOptions), fmt.Sprintf("  %s", createNewBranchOption)))
+		return renderScreen(
+			"Select checkout target",
+			"Choose the branch or tag to apply commits on.",
+			strings.Join(rows, "\n"),
+			[]string{"↑↓  move", "enter  checkout", "n  new branch", "q  quit"},
+		)
+	case "new_branch_base_select":
+		if len(m.CheckoutOptions) == 0 {
+			return renderScreen(
+				"Select new branch base",
+				"No branch or tag bases found.",
+				"",
+				[]string{"q  quit"},
+			)
+		}
 		rows := make([]string, 0, len(m.CheckoutOptions))
 		for i, option := range m.CheckoutOptions {
 			rows = append(rows, renderRow(i == m.CheckoutIndex, fmt.Sprintf("  %s", option)))
 		}
 		return renderScreen(
-			"Select checkout target",
-			"Choose the branch or tag to apply commits on.",
+			"Select new branch base",
+			"Pick the branch or tag to branch from.",
 			strings.Join(rows, "\n"),
-			[]string{"↑↓  move", "enter  checkout", "q  quit"},
+			[]string{"↑↓  move", "enter  continue", "esc  back", "q  quit"},
+		)
+	case "new_branch_name_select":
+		return renderScreen(
+			"Create branch",
+			fmt.Sprintf("Base ref: %s", m.NewBranchBase),
+			fmt.Sprintf("Branch name: %s\n\nType to edit the branch name, then press enter.", m.NewBranchName),
+			[]string{"type  edit", "backspace  delete", "enter  create", "esc  back", "q  quit"},
+		)
+	case "cherry_pick_validation":
+		validationText := "The post cherry-pick command failed."
+		if m.CherryPickValidationErr != nil {
+			validationText = validationText + "\n\n" + renderError(m.CherryPickValidationErr)
+		}
+		if strings.TrimSpace(m.CherryPickCommit.ShortSHA) != "" || strings.TrimSpace(m.CherryPickCommit.Title) != "" {
+			validationText += fmt.Sprintf("\n\n%s %s", m.CherryPickCommit.ShortSHA, m.CherryPickCommit.Title)
+		}
+		return renderScreen(
+			"Validation failed",
+			"Run the editor, retry, continue anyway, or abort.",
+			validationText,
+			[]string{"e  editor", "r  retry", "c  continue", "a  abort", "esc  back"},
 		)
 	case "cherry_pick_progress":
 		return renderScreen(
@@ -747,14 +998,21 @@ func (m Model) loadRemoteOptionsCmd(token int, remote string) tea.Cmd {
 	}
 }
 
-func (m Model) loadCommitsCmd(token int, compareFrom string) tea.Cmd {
+func (m Model) loadCompareToOptionsCmd(token int, compareFrom string) tea.Cmd {
+	return func() tea.Msg {
+		options, err := m.loadCompareTargets(context.Background())
+		return compareToOptionsLoadedMsg{token: token, compareFrom: compareFrom, options: options, err: err}
+	}
+}
+
+func (m Model) loadCommitsCmd(token int, compareFrom, compareTo string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		commits, err := m.Git.LogRange(ctx, m.WorkDir, compareFrom, "HEAD")
+		commits, err := m.Git.LogRange(ctx, m.WorkDir, compareFrom, compareTo)
 		if err == nil {
 			commits = m.enrichCommitsWithPRs(commits)
 		}
-		return commitsLoadedMsg{token: token, compareFrom: compareFrom, commits: commits, err: err}
+		return commitsLoadedMsg{token: token, compareFrom: compareFrom, compareTo: compareTo, commits: commits, err: err}
 	}
 }
 
@@ -850,6 +1108,9 @@ func (m Model) isOpenPRShortcut(msg tea.KeyMsg) bool {
 
 func (m *Model) handleCheckoutEnter() error {
 	target := m.selectedCheckoutOption()
+	if target == createNewBranchOption {
+		return nil
+	}
 	if strings.TrimSpace(target) == "" {
 		return errors.New("no checkout target selected")
 	}
@@ -863,6 +1124,9 @@ func (m *Model) handleCheckoutEnter() error {
 func (m Model) selectedCheckoutOption() string {
 	if len(m.CheckoutOptions) == 0 {
 		return ""
+	}
+	if m.CheckoutIndex == len(m.CheckoutOptions) {
+		return createNewBranchOption
 	}
 	if m.CheckoutIndex < 0 || m.CheckoutIndex >= len(m.CheckoutOptions) {
 		return m.CheckoutOptions[0]
@@ -908,6 +1172,18 @@ func (m Model) loadCheckoutOptions(ctx context.Context) ([]string, error) {
 	return mergeUnique(branches, tags), nil
 }
 
+func (m Model) loadCompareTargets(ctx context.Context) ([]string, error) {
+	branches, err := m.Git.LocalBranches(ctx, m.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := m.Git.Tags(ctx, m.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	return mergeUnique([]string{"HEAD"}, branches, tags), nil
+}
+
 func (m Model) applySelectedCommitsCmd(token int, startSelectedIndex int) tea.Cmd {
 	return func() tea.Msg {
 		commits := append([]git.Commit(nil), m.Commits...)
@@ -931,6 +1207,16 @@ func (m Model) applySelectedCommitsCmd(token int, startSelectedIndex int) tea.Cm
 			}
 			commits[i].Status = "applied"
 			commits[i].Selected = false
+				if strings.TrimSpace(m.Config.PostCherryPickCmd) != "" {
+					if err := runShellCommand(context.Background(), m.Git.Runner, m.Logger, m.WorkDir, m.Config.PostCherryPickCmd); err != nil {
+						return cherryPickValidationMsg{
+							token:  token,
+							index:  selectedIndex,
+							commit: commits[i],
+						err:    err,
+					}
+				}
+			}
 			selectedIndex++
 		}
 		return cherryPickAppliedMsg{token: token, commits: commits}
@@ -971,6 +1257,191 @@ func (m *Model) cherryPickAbort() error {
 	return nil
 }
 
+func (m *Model) resumeCherryPickAfterValidation() (tea.Model, tea.Cmd) {
+	m.CherryPickValidationErr = nil
+	m.CherryPickErr = nil
+	if len(m.selectedCommits()) == 0 {
+		m.setScreen("versioning")
+		return Model(*m), nil
+	}
+	m.setScreen("cherry_pick_progress")
+	token := m.beginLoading("Applying selected commits...")
+	return Model(*m), tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, m.CherryPickIndex+1))
+}
+
+func (m *Model) continueAfterCheckout() (tea.Model, tea.Cmd) {
+	selected := m.selectedCommits()
+	if len(selected) == 0 {
+		m.Err = nil
+		m.setScreen("versioning")
+		return Model(*m), nil
+	}
+	m.setScreen("cherry_pick_progress")
+	token := m.beginLoading("Applying selected commits...")
+	return Model(*m), tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, 0))
+}
+
+func (m Model) selectedCompareTo() string {
+	if len(m.CompareToOptions) == 0 {
+		return "HEAD"
+	}
+	if m.CompareToIndex < 0 || m.CompareToIndex >= len(m.CompareToOptions) {
+		return m.CompareToOptions[0]
+	}
+	return m.CompareToOptions[m.CompareToIndex]
+}
+
+func (m Model) selectedCheckoutBase() string {
+	if len(m.CheckoutOptions) == 0 {
+		return ""
+	}
+	if m.CheckoutIndex < 0 || m.CheckoutIndex >= len(m.CheckoutOptions) {
+		return m.CheckoutOptions[0]
+	}
+	return m.CheckoutOptions[m.CheckoutIndex]
+}
+
+func (m *Model) handleNewBranchEnter() error {
+	base := strings.TrimSpace(m.NewBranchBase)
+	if base == "" {
+		return errors.New("no branch base selected")
+	}
+	branch := strings.TrimSpace(m.NewBranchName)
+	if branch == "" {
+		return errors.New("new branch name is required")
+	}
+	exists, err := m.Git.BranchExists(context.Background(), m.WorkDir, branch)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("branch %s already exists", branch)
+	}
+	if _, err := m.runLogged(context.Background(), "git", "checkout", "-b", branch, base); err != nil {
+		return err
+	}
+	m.BranchName = branch
+	return nil
+}
+
+func (m Model) filteredCommitIndexes() []int {
+	query := strings.ToLower(strings.TrimSpace(m.CommitFilter))
+	indexes := make([]int, 0, len(m.Commits))
+	for i, commit := range m.Commits {
+		if query == "" || commitMatchesFilter(commit, query) {
+			indexes = append(indexes, i)
+		}
+	}
+	return indexes
+}
+
+func commitMatchesFilter(commit git.Commit, query string) bool {
+	if query == "" {
+		return true
+	}
+	if strings.Contains(strings.ToLower(commit.SHA), query) || strings.Contains(strings.ToLower(commit.ShortSHA), query) || strings.Contains(strings.ToLower(commit.Title), query) {
+		return true
+	}
+	if strings.Contains(strings.ToLower(commit.PRTitle), query) {
+		return true
+	}
+	for _, label := range commit.Labels {
+		if strings.Contains(strings.ToLower(label), query) {
+			return true
+		}
+	}
+	if commit.PRNumber > 0 {
+		number := fmt.Sprintf("%d", commit.PRNumber)
+		if strings.Contains(number, strings.TrimPrefix(query, "#")) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) ensureVisibleCommitFocus() {
+	indexes := m.filteredCommitIndexes()
+	if len(indexes) == 0 {
+		m.CommitIndex = 0
+		return
+	}
+	if !containsInt(indexes, m.CommitIndex) {
+		m.CommitIndex = indexes[0]
+	}
+	if !containsInt(indexes, m.CommitRangeAnchor) {
+		m.CommitRangeAnchor = m.CommitIndex
+	}
+}
+
+func (m *Model) moveCommitFocus(delta int) {
+	indexes := m.filteredCommitIndexes()
+	if len(indexes) == 0 {
+		return
+	}
+	currentPos := indexOfInt(indexes, m.CommitIndex)
+	if currentPos < 0 {
+		currentPos = 0
+	}
+	nextPos := currentPos + delta
+	for nextPos < 0 {
+		nextPos += len(indexes)
+	}
+	nextPos = nextPos % len(indexes)
+	m.CommitIndex = indexes[nextPos]
+	if m.CommitRangeAnchor < 0 || !containsInt(indexes, m.CommitRangeAnchor) {
+		m.CommitRangeAnchor = m.CommitIndex
+	}
+}
+
+func (m *Model) toggleFocusedCommit() {
+	indexes := m.filteredCommitIndexes()
+	if len(indexes) == 0 {
+		return
+	}
+	current := m.CommitIndex
+	if !containsInt(indexes, current) {
+		current = indexes[0]
+		m.CommitIndex = current
+	}
+	m.Commits[current].Selected = !m.Commits[current].Selected
+	m.CommitRangeAnchor = current
+}
+
+func (m *Model) selectCommitRangeToFocus() {
+	indexes := m.filteredCommitIndexes()
+	if len(indexes) == 0 {
+		return
+	}
+	currentPos := indexOfInt(indexes, m.CommitIndex)
+	if currentPos < 0 {
+		currentPos = 0
+		m.CommitIndex = indexes[0]
+	}
+	anchorPos := indexOfInt(indexes, m.CommitRangeAnchor)
+	if anchorPos < 0 {
+		anchorPos = currentPos
+	}
+	if anchorPos > currentPos {
+		anchorPos, currentPos = currentPos, anchorPos
+	}
+	for i := anchorPos; i <= currentPos; i++ {
+		m.Commits[indexes[i]].Selected = true
+	}
+}
+
+func containsInt(items []int, value int) bool {
+	return indexOfInt(items, value) >= 0
+}
+
+func indexOfInt(items []int, value int) int {
+	for i, item := range items {
+		if item == value {
+			return i
+		}
+	}
+	return -1
+}
+
 func (m *Model) markCommitBySHA(sha, status string, selected bool) {
 	for i := range m.Commits {
 		if m.Commits[i].SHA != sha {
@@ -1004,6 +1475,9 @@ func (m *Model) handleTagEnter() error {
 	if m.TagName == "" {
 		m.TagName = "v1.2.1"
 	}
+	if err := m.validateTagAvailability(context.Background(), m.PushRemote, m.TagName); err != nil {
+		return err
+	}
 	if _, err := m.runLogged(context.Background(), "git", "tag", "-a", m.TagName, "-m", m.TagName); err != nil {
 		return err
 	}
@@ -1019,6 +1493,24 @@ func (m *Model) handleTagEnter() error {
 		return err
 	}
 	m.BranchName = branch
+	return nil
+}
+
+func (m Model) validateTagAvailability(ctx context.Context, remote, tag string) error {
+	exists, err := m.Git.TagExists(ctx, m.WorkDir, tag)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("tag %s already exists locally", tag)
+	}
+	remoteExists, err := m.Git.RemoteTagExists(ctx, m.WorkDir, remote, tag)
+	if err != nil {
+		return err
+	}
+	if remoteExists {
+		return fmt.Errorf("tag %s already exists on %s", tag, remote)
+	}
 	return nil
 }
 
@@ -1137,6 +1629,10 @@ func (m Model) saveState() error {
 	state := stateSnapshot{
 		CurrentStep:     m.screen,
 		CurrentCommit:   m.currentCommitSHA(),
+		CompareFrom:     m.CompareFrom,
+		CompareTo:       m.CompareTo,
+		NewBranchName:   m.NewBranchName,
+		NewBranchBase:   m.NewBranchBase,
 		TagName:         m.TagName,
 		ReleaseName:     m.ReleaseName,
 		SelectedCommits: m.selectedStateCommits(),
@@ -1159,6 +1655,10 @@ func (m Model) resolveStatePath() string {
 type stateSnapshot struct {
 	CurrentStep     string        `json:"currentStep"`
 	CurrentCommit   string        `json:"currentCommit"`
+	CompareFrom     string        `json:"compareFrom,omitempty"`
+	CompareTo       string        `json:"compareTo,omitempty"`
+	NewBranchName   string        `json:"newBranchName,omitempty"`
+	NewBranchBase   string        `json:"newBranchBase,omitempty"`
 	TagName         string        `json:"tagName,omitempty"`
 	ReleaseName     string        `json:"releaseName,omitempty"`
 	SelectedCommits []stateCommit `json:"selectedCommits"`

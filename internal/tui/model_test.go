@@ -113,7 +113,8 @@ func TestRefSelectEnterShowsLoadingBeforeCommitSelect(t *testing.T) {
 	m := New(Options{
 		Config: configDefaultForTest(),
 		Git: git.NewClient(fakeRunner{outputs: map[string]string{
-			"git log --pretty=format:%H%x09%h%x09%an%x09%ad%x09%s --date=short upstream/main...HEAD": "sha1\tshort1\tAna\t2024-01-01\tFix login\n",
+			"git for-each-ref --format=%(refname:short) refs/heads": "main\n",
+			"git tag --list": "v1.2.0\n",
 		}}),
 	})
 	m.screen = "ref_select"
@@ -125,7 +126,7 @@ func TestRefSelectEnterShowsLoadingBeforeCommitSelect(t *testing.T) {
 	if got.ScreenName() != "ref_select" {
 		t.Fatalf("ScreenName() = %q, want ref_select while loading", got.ScreenName())
 	}
-	if view := stripANSI(got.View()); !strings.Contains(view, "Loading commits") {
+	if view := stripANSI(got.View()); !strings.Contains(view, "Loading compare targets") {
 		t.Fatalf("View() = %q", view)
 	}
 }
@@ -307,7 +308,16 @@ func TestRefSelectShowsAvailableRefs(t *testing.T) {
 }
 
 func TestRefSelectMovesAndChoosesBase(t *testing.T) {
-	m := New(Options{Config: configDefaultForTest()})
+	runner := &recordingRunner{outputs: map[string]string{
+		"git for-each-ref --format=%(refname:short) refs/heads": "main\nrelease/1.2.0\n",
+		"git tag --list": "v1.2.0\nv1.2.1\n",
+		"git log --pretty=format:%H%x09%h%x09%an%x09%ad%x09%s --date=short upstream/release/1.2.0...main": "sha1\tshort1\tAna\t2024-01-01\tFix login\n",
+	}}
+	m := New(Options{
+		WorkDir: "/tmp/repo",
+		Config:  configDefaultForTest(),
+		Git:     git.NewClient(runner),
+	})
 	m.screen = "ref_select"
 	m.RefOptions = []string{"upstream/main", "upstream/release/1.2.0", "v1.2.0"}
 
@@ -323,17 +333,43 @@ func TestRefSelectMovesAndChoosesBase(t *testing.T) {
 		t.Fatalf("ScreenName() = %q, want ref_select while loading", got.ScreenName())
 	}
 	got = applyCmd(t, got, cmd)
+	if got.ScreenName() != "compare_to_select" {
+		t.Fatalf("ScreenName() = %q, want compare_to_select", got.ScreenName())
+	}
 	if got.CompareFrom != "upstream/release/1.2.0" {
 		t.Fatalf("CompareFrom = %q, want upstream/release/1.2.0", got.CompareFrom)
 	}
+	if len(got.CompareToOptions) != 5 || got.CompareToOptions[0] != "HEAD" || got.CompareToOptions[1] != "main" || got.CompareToOptions[2] != "release/1.2.0" || got.CompareToOptions[3] != "v1.2.0" || got.CompareToOptions[4] != "v1.2.1" {
+		t.Fatalf("CompareToOptions = %#v", got.CompareToOptions)
+	}
+
+	next, _ = got.Update(keyMsgDown())
+	got = next.(Model)
+	next, cmd = got.Update(keyMsgEnter())
+	got = next.(Model)
+	got = applyCmd(t, got, cmd)
 	if got.ScreenName() != "commit_select" {
 		t.Fatalf("ScreenName() = %q, want commit_select", got.ScreenName())
+	}
+	if got.CompareFrom != "upstream/release/1.2.0" {
+		t.Fatalf("CompareFrom = %q, want upstream/release/1.2.0", got.CompareFrom)
+	}
+	if got.CompareTo != "main" {
+		t.Fatalf("CompareTo = %q, want main", got.CompareTo)
+	}
+	if len(got.Commits) != 1 || got.Commits[0].ShortSHA != "short1" {
+		t.Fatalf("Commits = %#v", got.Commits)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls = %#v", runner.calls)
 	}
 }
 
 func TestRefSelectLoadsCommitsIntoCommitSelect(t *testing.T) {
 	runner := &recordingRunner{outputs: map[string]string{
-		"git log --pretty=format:%H%x09%h%x09%an%x09%ad%x09%s --date=short upstream/main...HEAD": "sha1\tshort1\tAna\t2024-01-01\tFix login\nsha2\tshort2\tBob\t2024-01-02\tUpdate docs\n",
+		"git for-each-ref --format=%(refname:short) refs/heads": "main\n",
+		"git tag --list": "v1.2.0\nv1.2.1\n",
+		"git log --pretty=format:%H%x09%h%x09%an%x09%ad%x09%s --date=short upstream/main...main": "sha1\tshort1\tAna\t2024-01-01\tFix login\nsha2\tshort2\tBob\t2024-01-02\tUpdate docs\n",
 	}}
 	m := New(Options{
 		WorkDir: "/tmp/repo",
@@ -351,13 +387,21 @@ func TestRefSelectLoadsCommitsIntoCommitSelect(t *testing.T) {
 		t.Fatalf("ScreenName() = %q, want ref_select while loading", got.ScreenName())
 	}
 	got = applyCmd(t, got, cmd)
+	if got.ScreenName() != "compare_to_select" {
+		t.Fatalf("ScreenName() = %q, want compare_to_select", got.ScreenName())
+	}
+	next, _ = got.Update(keyMsgDown())
+	got = next.(Model)
+	next, cmd = got.Update(keyMsgEnter())
+	got = next.(Model)
+	got = applyCmd(t, got, cmd)
 	if got.ScreenName() != "commit_select" {
 		t.Fatalf("ScreenName() = %q, want commit_select", got.ScreenName())
 	}
 	if len(got.Commits) != 2 || got.Commits[0].Title != "Fix login" || got.Commits[1].ShortSHA != "short2" {
 		t.Fatalf("Commits = %#v", got.Commits)
 	}
-	if len(runner.calls) != 1 {
+	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 }
@@ -401,7 +445,9 @@ func TestRefSelectEnrichesCommitsWithPRData(t *testing.T) {
 		WorkDir: "/tmp/repo",
 		Config:  configDefaultForTest(),
 		Git: git.NewClient(&recordingRunner{outputs: map[string]string{
-			"git log --pretty=format:%H%x09%h%x09%an%x09%ad%x09%s --date=short upstream/main...HEAD": "sha1\tshort1\tAna\t2024-01-01\tFix login\n",
+			"git for-each-ref --format=%(refname:short) refs/heads": "main\n",
+			"git tag --list": "v1.2.0\n",
+			"git log --pretty=format:%H%x09%h%x09%an%x09%ad%x09%s --date=short upstream/main...main": "sha1\tshort1\tAna\t2024-01-01\tFix login\n",
 		}}),
 		GitHub: github.NewClient(ghRunner),
 	})
@@ -414,6 +460,15 @@ func TestRefSelectEnrichesCommitsWithPRData(t *testing.T) {
 	if got.ScreenName() != "ref_select" {
 		t.Fatalf("ScreenName() = %q, want ref_select while loading", got.ScreenName())
 	}
+	got = applyCmd(t, got, cmd)
+	if got.ScreenName() != "compare_to_select" {
+		t.Fatalf("ScreenName() = %q, want compare_to_select", got.ScreenName())
+	}
+	next, cmd = got.Update(keyMsgDown())
+	got = next.(Model)
+	got = applyCmd(t, got, cmd)
+	next, cmd = got.Update(keyMsgEnter())
+	got = next.(Model)
 	got = applyCmd(t, got, cmd)
 	if got.Commits[0].PRNumber != 123 || got.Commits[0].PRURL == "" || len(got.Commits[0].Labels) != 2 {
 		t.Fatalf("Commits = %#v", got.Commits[0])
@@ -524,6 +579,73 @@ func TestCommitSelectOOpensFocusedPR(t *testing.T) {
 	}
 }
 
+func TestCommitSelectFiltersAndExitsFilterMode(t *testing.T) {
+	m := New(Options{Config: configDefaultForTest()})
+	m.screen = "commit_select"
+	m.Commits = []git.Commit{
+		{ShortSHA: "short1", Title: "Fix login", Labels: []string{"bug"}},
+		{ShortSHA: "short2", Title: "Update docs"},
+		{ShortSHA: "short3", Title: "Fix logout"},
+	}
+
+	next, _ := m.Update(keyMsgCtrlF())
+	got := next.(Model)
+	if !got.CommitFiltering {
+		t.Fatal("CommitFiltering = false, want true")
+	}
+
+	next, _ = got.Update(keyMsgRune("login"))
+	got = next.(Model)
+	if len(got.filteredCommitIndexes()) != 1 {
+		t.Fatalf("filteredCommitIndexes = %#v", got.filteredCommitIndexes())
+	}
+
+	next, _ = got.Update(keyMsgEsc())
+	got = next.(Model)
+	if got.CommitFiltering {
+		t.Fatal("CommitFiltering = true, want false")
+	}
+}
+
+func TestCommitSelectShiftDownSelectsInterval(t *testing.T) {
+	m := New(Options{Config: configDefaultForTest()})
+	m.screen = "commit_select"
+	m.Commits = []git.Commit{
+		{ShortSHA: "short1", Title: "Fix login"},
+		{ShortSHA: "short2", Title: "Update docs"},
+		{ShortSHA: "short3", Title: "Fix logout"},
+	}
+
+	next, _ := m.Update(keyMsgShiftDown())
+	got := next.(Model)
+	if got.CommitIndex != 1 {
+		t.Fatalf("CommitIndex = %d, want 1", got.CommitIndex)
+	}
+	if !got.Commits[0].Selected || !got.Commits[1].Selected || got.Commits[2].Selected {
+		t.Fatalf("Commits = %#v", got.Commits)
+	}
+}
+
+func TestCommitSelectVRangesFromAnchor(t *testing.T) {
+	m := New(Options{Config: configDefaultForTest()})
+	m.screen = "commit_select"
+	m.Commits = []git.Commit{
+		{ShortSHA: "short1", Title: "Fix login"},
+		{ShortSHA: "short2", Title: "Update docs"},
+		{ShortSHA: "short3", Title: "Fix logout"},
+	}
+
+	next, _ := m.Update(keyMsgDown())
+	got := next.(Model)
+	next, _ = got.Update(keyMsgDown())
+	got = next.(Model)
+	next, _ = got.Update(keyMsgRune("v"))
+	got = next.(Model)
+	if !got.Commits[0].Selected || !got.Commits[1].Selected || !got.Commits[2].Selected {
+		t.Fatalf("Commits = %#v", got.Commits)
+	}
+}
+
 func TestCheckoutSelectShowsTargets(t *testing.T) {
 	m := New(Options{Config: configDefaultForTest()})
 	m.screen = "checkout_select"
@@ -560,6 +682,48 @@ func TestCheckoutSelectChoosesExistingBranch(t *testing.T) {
 	}
 }
 
+func TestCheckoutSelectCreatesNewBranchFromBase(t *testing.T) {
+	runner := &recordingRunner{outputs: map[string]string{
+		"git for-each-ref --format=%(refname:short) refs/heads": "main\nrelease/1.2.0\n",
+		"git tag --list": "v1.2.0\nv1.2.1\n",
+		"git branch --list release/1.2.1": "",
+		"git checkout -b release/1.2.1 v1.2.0": "",
+	}}
+	m := New(Options{
+		WorkDir: "/tmp/repo",
+		Config:  configDefaultForTest(),
+		Git:     git.NewClient(runner),
+	})
+	m.screen = "checkout_select"
+	m.CheckoutOptions = []string{"v1.2.0", "v1.2.1"}
+	m.CheckoutIndex = len(m.CheckoutOptions)
+
+	next, _ := m.Update(keyMsgEnter())
+	got := next.(Model)
+	if got.ScreenName() != "new_branch_base_select" {
+		t.Fatalf("ScreenName() = %q, want new_branch_base_select", got.ScreenName())
+	}
+
+	next, _ = got.Update(keyMsgEnter())
+	got = next.(Model)
+	if got.ScreenName() != "new_branch_name_select" {
+		t.Fatalf("ScreenName() = %q, want new_branch_name_select", got.ScreenName())
+	}
+	next, _ = got.Update(keyMsgRune("release/1.2.1"))
+	got = next.(Model)
+	next, _ = got.Update(keyMsgEnter())
+	got = next.(Model)
+	if got.ScreenName() != "versioning" {
+		t.Fatalf("ScreenName() = %q, want versioning", got.ScreenName())
+	}
+	if got.BranchName != "release/1.2.1" {
+		t.Fatalf("BranchName = %q, want release/1.2.1", got.BranchName)
+	}
+	if len(runner.calls) != 2 || runner.calls[0] != "git branch --list release/1.2.1" || runner.calls[1] != "git checkout -b release/1.2.1 v1.2.0" {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+}
+
 func TestCommitSelectLoadsCheckoutTargetsBeforeAdvancing(t *testing.T) {
 	runner := &recordingRunner{outputs: map[string]string{
 		"git for-each-ref --format=%(refname:short) refs/heads": "main\nrelease/1.2.0\n",
@@ -585,7 +749,7 @@ func TestCommitSelectLoadsCheckoutTargetsBeforeAdvancing(t *testing.T) {
 	if len(got.CheckoutOptions) != 4 || got.CheckoutOptions[0] != "main" || got.CheckoutOptions[1] != "release/1.2.0" || got.CheckoutOptions[2] != "v1.2.0" || got.CheckoutOptions[3] != "v1.2.1" {
 		t.Fatalf("CheckoutOptions = %#v", got.CheckoutOptions)
 	}
-	if len(runner.calls) != 2 {
+	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 }
@@ -617,6 +781,66 @@ func TestCherryPickProgressAppliesSelectedCommitsAndMovesToVersioning(t *testing
 	}
 	if len(runner.calls) != 2 {
 		t.Fatalf("calls = %#v", runner.calls)
+	}
+}
+
+func TestCherryPickRunsPostCommandAfterEachAppliedCommit(t *testing.T) {
+	runner := &recordingRunner{outputs: map[string]string{
+		"git cherry-pick sha1":  "",
+		"sh -c flutter analyze": "",
+		"git cherry-pick sha2":  "",
+	}}
+	m := New(Options{
+		WorkDir: "/tmp/repo",
+		Config: config.Config{
+			PostCherryPickCmd: "flutter analyze",
+		},
+		Git: git.NewClient(runner),
+	})
+	m.screen = "cherry_pick_progress"
+	m.Commits = []git.Commit{
+		{SHA: "sha1", ShortSHA: "short1", Title: "Fix login", Selected: true},
+		{SHA: "sha2", ShortSHA: "short2", Title: "Update docs", Selected: true},
+	}
+
+	next, cmd := m.Update(keyMsgEnter())
+	got := next.(Model)
+	got = applyCmd(t, got, cmd)
+	if got.ScreenName() != "versioning" {
+		t.Fatalf("ScreenName() = %q, want versioning", got.ScreenName())
+	}
+	if len(runner.calls) != 4 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+}
+
+func TestCherryPickPostCommandFailurePausesForValidation(t *testing.T) {
+	runner := &recordingRunner{
+		outputs: map[string]string{
+			"git cherry-pick sha1": "",
+		},
+		errs: map[string]error{
+			"sh -c flutter analyze": errors.New("validation failed"),
+		},
+	}
+	m := New(Options{
+		WorkDir: "/tmp/repo",
+		Config: config.Config{
+			PostCherryPickCmd: "flutter analyze",
+		},
+		Git: git.NewClient(runner),
+	})
+	m.screen = "cherry_pick_progress"
+	m.Commits = []git.Commit{{SHA: "sha1", ShortSHA: "short1", Title: "Fix login", Selected: true}}
+
+	next, cmd := m.Update(keyMsgEnter())
+	got := next.(Model)
+	got = applyCmd(t, got, cmd)
+	if got.ScreenName() != "cherry_pick_validation" {
+		t.Fatalf("ScreenName() = %q, want cherry_pick_validation", got.ScreenName())
+	}
+	if got.CherryPickValidationErr == nil {
+		t.Fatal("CherryPickValidationErr = nil, want error")
 	}
 }
 
@@ -701,9 +925,11 @@ func TestVersioningKeysAndContinue(t *testing.T) {
 
 func TestPushTagAndReleaseFlow(t *testing.T) {
 	runner := &recordingRunner{outputs: map[string]string{
-		"git push origin release/1.2.1": "",
-		"git tag -a v1.2.2 -m v1.2.2":   "",
-		"git push origin v1.2.2":        "",
+		"git push origin release/1.2.1":          "",
+		"git tag --list v1.2.2":                  "",
+		"git ls-remote --tags origin v1.2.2":     "",
+		"git tag -a v1.2.2 -m v1.2.2":            "",
+		"git push origin v1.2.2":                 "",
 		"gh release create v1.2.2 --target release/1.2.1 --title v1.2.2-rc1 --notes-file /tmp/repo/.patchflow/release-notes.md --draft": "",
 	}}
 	m := New(Options{
@@ -762,6 +988,70 @@ func TestPushTagAndReleaseFlow(t *testing.T) {
 	}
 }
 
+func TestTagSelectBlocksExistingLocalTag(t *testing.T) {
+	runner := &recordingRunner{outputs: map[string]string{
+		"git push origin release/1.2.1":      "",
+		"git tag --list v1.2.2":              "v1.2.2\n",
+		"git ls-remote --tags origin v1.2.2": "",
+	}}
+	m := New(Options{
+		WorkDir: "/tmp/repo",
+		Config: config.Config{
+			DefaultPushRemote: "origin",
+		},
+		Git: git.NewClient(runner),
+	})
+	m.screen = "push_select"
+	m.BranchName = "release/1.2.1"
+	m.TagName = "v1.2.2"
+
+	next, _ := m.Update(keyMsgEnter())
+	got := next.(Model)
+	next, _ = got.Update(keyMsgEnter())
+	got = next.(Model)
+	if got.ScreenName() != "tag_select" {
+		t.Fatalf("ScreenName() = %q, want tag_select", got.ScreenName())
+	}
+	if got.Err == nil || !strings.Contains(got.Err.Error(), "already exists locally") {
+		t.Fatalf("Err = %v", got.Err)
+	}
+	if len(runner.calls) != 3 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+}
+
+func TestTagSelectBlocksExistingRemoteTag(t *testing.T) {
+	runner := &recordingRunner{outputs: map[string]string{
+		"git push origin release/1.2.1":      "",
+		"git tag --list v1.2.2":              "",
+		"git ls-remote --tags origin v1.2.2": "deadbeef\trefs/tags/v1.2.2\n",
+	}}
+	m := New(Options{
+		WorkDir: "/tmp/repo",
+		Config: config.Config{
+			DefaultPushRemote: "origin",
+		},
+		Git: git.NewClient(runner),
+	})
+	m.screen = "push_select"
+	m.BranchName = "release/1.2.1"
+	m.TagName = "v1.2.2"
+
+	next, _ := m.Update(keyMsgEnter())
+	got := next.(Model)
+	next, _ = got.Update(keyMsgEnter())
+	got = next.(Model)
+	if got.ScreenName() != "tag_select" {
+		t.Fatalf("ScreenName() = %q, want tag_select", got.ScreenName())
+	}
+	if got.Err == nil || !strings.Contains(got.Err.Error(), "already exists on origin") {
+		t.Fatalf("Err = %v", got.Err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+}
+
 func configDefaultForTest() config.Config {
 	return config.Config{DefaultRemote: "upstream"}
 }
@@ -786,12 +1076,24 @@ func keyMsgCtrlD() tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyCtrlD}
 }
 
+func keyMsgCtrlF() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyCtrlF}
+}
+
 func keyMsgEsc() tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyEsc}
 }
 
 func keyMsgBackspace() tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyBackspace}
+}
+
+func keyMsgShiftUp() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyShiftUp}
+}
+
+func keyMsgShiftDown() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyShiftDown}
 }
 
 func keyMsgCtrlEnter() tea.KeyMsg {
@@ -808,6 +1110,9 @@ func keyMsgRune(value string) tea.KeyMsg {
 
 func applyCmd(t *testing.T, m Model, cmd tea.Cmd) Model {
 	t.Helper()
+	if cmd == nil {
+		return m
+	}
 	msg := cmd()
 	switch msg := msg.(type) {
 	case tea.BatchMsg:

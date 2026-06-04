@@ -1,0 +1,3 @@
+$ sh -c flutter analyze
+sh: 1: flutter: not found
+
