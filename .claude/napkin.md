@@ -21,6 +21,8 @@
    Do instead: keep compare, select, cherry-pick, version, push, tag, release as explicit steps.
 1. **[2026-06-04] PR lookup best effort**
    Do instead: treat missing PR metadata as non-blocking and keep commit flow moving.
+1. **[2026-06-04] Loading stays on current screen until result**
+   Do instead: show spinner/message as overlay, keep screen stable, and let ESC cancel loading without losing context.
 
 ## User Directives
 1. **[2026-06-04] TDD required**

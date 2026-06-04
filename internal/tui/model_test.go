@@ -86,6 +86,154 @@ func TestEnterShowsErrorWhenRemoteListFails(t *testing.T) {
 	}
 }
 
+func TestRemoteSelectEnterShowsLoadingBeforeRefSelect(t *testing.T) {
+	m := New(Options{
+		Config: configDefaultForTest(),
+		Git: git.NewClient(fakeRunner{outputs: map[string]string{
+			"git fetch origin --tags --prune":                                "",
+			"git for-each-ref --format=%(refname:short) refs/remotes/origin": "origin/main\n",
+			"git tag --list": "v1.2.0\n",
+		}}),
+	})
+	m.screen = "remote_select"
+	m.Remotes = []git.Remote{{Name: "origin"}}
+
+	next, _ := m.Update(keyMsgEnter())
+	got := next.(Model)
+	if got.ScreenName() != "remote_select" {
+		t.Fatalf("ScreenName() = %q, want remote_select while loading", got.ScreenName())
+	}
+	if view := stripANSI(got.View()); !strings.Contains(view, "loading refs") {
+		t.Fatalf("View() = %q", view)
+	}
+}
+
+func TestRefSelectEnterShowsLoadingBeforeCommitSelect(t *testing.T) {
+	m := New(Options{
+		Config: configDefaultForTest(),
+		Git: git.NewClient(fakeRunner{outputs: map[string]string{
+			"git log --pretty=format:%H%x09%h%x09%an%x09%ad%x09%s --date=short upstream/main...HEAD": "sha1\tshort1\tAna\t2024-01-01\tFix login\n",
+		}}),
+	})
+	m.screen = "ref_select"
+	m.RefOptions = []string{"upstream/main"}
+	m.RefIndex = 0
+
+	next, _ := m.Update(keyMsgEnter())
+	got := next.(Model)
+	if got.ScreenName() != "ref_select" {
+		t.Fatalf("ScreenName() = %q, want ref_select while loading", got.ScreenName())
+	}
+	if view := stripANSI(got.View()); !strings.Contains(view, "Loading commits") {
+		t.Fatalf("View() = %q", view)
+	}
+}
+
+func TestCommitSelectEnterShowsLoadingBeforeCheckoutSelect(t *testing.T) {
+	m := New(Options{
+		Config: configDefaultForTest(),
+		Git: git.NewClient(fakeRunner{outputs: map[string]string{
+			"git for-each-ref --format=%(refname:short) refs/heads": "main\nrelease/1.2.0\n",
+			"git tag --list": "v1.2.0\n",
+		}}),
+	})
+	m.screen = "commit_select"
+	m.Commits = []git.Commit{{ShortSHA: "short1", Title: "Fix login", Selected: true}}
+
+	next, _ := m.Update(keyMsgEnter())
+	got := next.(Model)
+	if got.ScreenName() != "commit_select" {
+		t.Fatalf("ScreenName() = %q, want commit_select while loading", got.ScreenName())
+	}
+	if view := stripANSI(got.View()); !strings.Contains(view, "Loading checkout targets") {
+		t.Fatalf("View() = %q", view)
+	}
+}
+
+func TestEscCancelsLoadingAndKeepsOriginScreen(t *testing.T) {
+	m := New(Options{Config: configDefaultForTest()})
+	m.screen = "remote_select"
+	m.loading = true
+	m.loadingMessage = "Fetching remote..."
+
+	next, _ := m.Update(keyMsgEsc())
+	got := next.(Model)
+	if got.loading {
+		t.Fatalf("loading = true, want false")
+	}
+	if got.ScreenName() != "remote_select" {
+		t.Fatalf("ScreenName() = %q, want remote_select", got.ScreenName())
+	}
+}
+
+func TestEscOnWelcomeStaysOnWelcome(t *testing.T) {
+	m := New(Options{Config: configDefaultForTest()})
+
+	next, _ := m.Update(keyMsgEsc())
+	got := next.(Model)
+	if got.ScreenName() != "welcome" {
+		t.Fatalf("ScreenName() = %q, want welcome", got.ScreenName())
+	}
+}
+
+func TestEscReturnsBackThroughFlowWithoutLosingState(t *testing.T) {
+	m := New(Options{
+		Config: configDefaultForTest(),
+		Git: git.NewClient(fakeRunner{outputs: map[string]string{
+			"git remote -v":                   "origin\tgit@github.com:a.git (fetch)\nupstream\tgit@github.com:b.git (fetch)\n",
+			"git fetch origin --tags --prune": "",
+			"git for-each-ref --format=%(refname:short) refs/remotes/origin": "origin/HEAD\norigin/main\norigin/release/1.2.0\n",
+			"git tag --list": "v1.2.0\nv1.2.1\n",
+		}}),
+	})
+
+	next, _ := m.Update(keyMsgEnter())
+	got := next.(Model)
+	next, cmd := got.Update(keyMsgEnter())
+	got = next.(Model)
+	if got.ScreenName() != "remote_select" {
+		t.Fatalf("ScreenName() = %q, want remote_select while loading", got.ScreenName())
+	}
+	next, _ = got.Update(cmd())
+	got = next.(Model)
+	if got.ScreenName() != "ref_select" {
+		t.Fatalf("ScreenName() = %q, want ref_select", got.ScreenName())
+	}
+
+	got.RefOptions = []string{"upstream/main", "upstream/release/1.2.0"}
+	got.RefIndex = 1
+
+	next, _ = got.Update(keyMsgEsc())
+	got = next.(Model)
+	if got.ScreenName() != "remote_select" {
+		t.Fatalf("ScreenName() = %q, want remote_select", got.ScreenName())
+	}
+	if got.RemoteIndex != 0 {
+		t.Fatalf("RemoteIndex = %d, want 0", got.RemoteIndex)
+	}
+	if len(got.Remotes) != 2 {
+		t.Fatalf("Remotes = %#v", got.Remotes)
+	}
+
+	next, _ = got.Update(keyMsgEsc())
+	got = next.(Model)
+	if got.ScreenName() != "welcome" {
+		t.Fatalf("ScreenName() = %q, want welcome", got.ScreenName())
+	}
+}
+
+func TestEscReturnsFromCherryPickProgressToPreviousScreen(t *testing.T) {
+	m := New(Options{Config: configDefaultForTest()})
+	m.screen = "cherry_pick_progress"
+	m.history = []string{"checkout_select"}
+
+	next, _ := m.Update(keyMsgEsc())
+	got := next.(Model)
+	if got.ScreenName() != "checkout_select" {
+		t.Fatalf("ScreenName() = %q, want checkout_select", got.ScreenName())
+	}
+}
+
 func TestRemoteSelectMovesFocusAndFetchesSelectedRemote(t *testing.T) {
 	runner := &recordingRunner{outputs: map[string]string{
 		"git fetch upstream --tags --prune":                                "",
@@ -106,7 +254,12 @@ func TestRemoteSelectMovesFocusAndFetchesSelectedRemote(t *testing.T) {
 		t.Fatalf("RemoteIndex = %d, want 1", got.RemoteIndex)
 	}
 
-	next, _ = got.Update(keyMsgEnter())
+	next, cmd := got.Update(keyMsgEnter())
+	got = next.(Model)
+	if got.ScreenName() != "remote_select" {
+		t.Fatalf("ScreenName() = %q, want remote_select while loading", got.ScreenName())
+	}
+	next, _ = got.Update(cmd())
 	got = next.(Model)
 	if got.ScreenName() != "ref_select" {
 		t.Fatalf("ScreenName() = %q, want ref_select", got.ScreenName())
@@ -141,7 +294,12 @@ func TestRefSelectMovesAndChoosesBase(t *testing.T) {
 		t.Fatalf("RefIndex = %d, want 1", got.RefIndex)
 	}
 
-	next, _ = got.Update(keyMsgEnter())
+	next, cmd := got.Update(keyMsgEnter())
+	got = next.(Model)
+	if got.ScreenName() != "ref_select" {
+		t.Fatalf("ScreenName() = %q, want ref_select while loading", got.ScreenName())
+	}
+	next, _ = got.Update(cmd())
 	got = next.(Model)
 	if got.CompareFrom != "upstream/release/1.2.0" {
 		t.Fatalf("CompareFrom = %q, want upstream/release/1.2.0", got.CompareFrom)
@@ -165,8 +323,13 @@ func TestRefSelectLoadsCommitsIntoCommitSelect(t *testing.T) {
 	m.RefIndex = 0
 	m.CompareFrom = "upstream/main"
 
-	next, _ := m.Update(keyMsgEnter())
+	next, cmd := m.Update(keyMsgEnter())
 	got := next.(Model)
+	if got.ScreenName() != "ref_select" {
+		t.Fatalf("ScreenName() = %q, want ref_select while loading", got.ScreenName())
+	}
+	next, _ = got.Update(cmd())
+	got = next.(Model)
 	if got.ScreenName() != "commit_select" {
 		t.Fatalf("ScreenName() = %q, want commit_select", got.ScreenName())
 	}
@@ -192,8 +355,13 @@ func TestRemoteSelectLoadsRealRefsAndAdvancesToRefSelect(t *testing.T) {
 	m.screen = "remote_select"
 	m.Remotes = []git.Remote{{Name: "upstream"}}
 
-	next, _ := m.Update(keyMsgEnter())
+	next, cmd := m.Update(keyMsgEnter())
 	got := next.(Model)
+	if got.ScreenName() != "remote_select" {
+		t.Fatalf("ScreenName() = %q, want remote_select while loading", got.ScreenName())
+	}
+	next, _ = got.Update(cmd())
+	got = next.(Model)
 	if got.ScreenName() != "ref_select" {
 		t.Fatalf("ScreenName() = %q, want ref_select", got.ScreenName())
 	}
@@ -221,8 +389,13 @@ func TestRefSelectEnrichesCommitsWithPRData(t *testing.T) {
 	m.RefOptions = []string{"upstream/main"}
 	m.CompareFrom = "upstream/main"
 
-	next, _ := m.Update(keyMsgEnter())
+	next, cmd := m.Update(keyMsgEnter())
 	got := next.(Model)
+	if got.ScreenName() != "ref_select" {
+		t.Fatalf("ScreenName() = %q, want ref_select while loading", got.ScreenName())
+	}
+	next, _ = got.Update(cmd())
+	got = next.(Model)
 	if got.Commits[0].PRNumber != 123 || got.Commits[0].PRURL == "" || len(got.Commits[0].Labels) != 2 {
 		t.Fatalf("Commits = %#v", got.Commits[0])
 	}
@@ -277,8 +450,13 @@ func TestCommitSelectEnterAdvancesToCheckoutSelect(t *testing.T) {
 	m.screen = "commit_select"
 	m.Commits = []git.Commit{{ShortSHA: "short1", Title: "Fix login", Selected: true}}
 
-	next, _ := m.Update(keyMsgEnter())
+	next, cmd := m.Update(keyMsgEnter())
 	got := next.(Model)
+	if got.ScreenName() != "commit_select" {
+		t.Fatalf("ScreenName() = %q, want commit_select while loading", got.ScreenName())
+	}
+	next, _ = got.Update(cmd())
+	got = next.(Model)
 	if got.ScreenName() != "checkout_select" {
 		t.Fatalf("ScreenName() = %q, want checkout_select", got.ScreenName())
 	}
@@ -377,8 +555,13 @@ func TestCommitSelectLoadsCheckoutTargetsBeforeAdvancing(t *testing.T) {
 	m.screen = "commit_select"
 	m.Commits = []git.Commit{{ShortSHA: "short1", Title: "Fix login", Selected: true}}
 
-	next, _ := m.Update(keyMsgEnter())
+	next, cmd := m.Update(keyMsgEnter())
 	got := next.(Model)
+	if got.ScreenName() != "commit_select" {
+		t.Fatalf("ScreenName() = %q, want commit_select while loading", got.ScreenName())
+	}
+	next, _ = got.Update(cmd())
+	got = next.(Model)
 	if got.ScreenName() != "checkout_select" {
 		t.Fatalf("ScreenName() = %q, want checkout_select", got.ScreenName())
 	}
@@ -512,6 +695,10 @@ func keyMsgCtrlA() tea.KeyMsg {
 
 func keyMsgCtrlD() tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyCtrlD}
+}
+
+func keyMsgEsc() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyEsc}
 }
 
 func keyMsgCtrlEnter() tea.KeyMsg {

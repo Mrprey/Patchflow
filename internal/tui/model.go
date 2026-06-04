@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"patchflow/internal/browser"
@@ -40,6 +41,11 @@ type Model struct {
 	Logger     logging.Logger
 
 	screen           string
+	history          []string
+	loading          bool
+	loadingMessage   string
+	loadingToken     int
+	spinner          spinner.Model
 	Remotes          []git.Remote
 	RemoteIndex      int
 	RefOptions       []string
@@ -68,11 +74,50 @@ func New(opts Options) Model {
 		Browser:    opts.Browser,
 		Logger:     opts.Logger,
 		screen:     "welcome",
+		spinner:    newLoadingSpinner(),
 	}
+}
+
+type remoteOptionsLoadedMsg struct {
+	token   int
+	remote  string
+	options []string
+	err     error
+}
+
+type commitsLoadedMsg struct {
+	token       int
+	compareFrom string
+	commits     []git.Commit
+	err         error
+}
+
+type checkoutOptionsLoadedMsg struct {
+	token   int
+	options []string
+	err     error
 }
 
 func (m Model) ScreenName() string {
 	return m.screen
+}
+
+func (m *Model) setScreen(next string) {
+	if next == "" || m.screen == next {
+		return
+	}
+	m.history = append(m.history, m.screen)
+	m.screen = next
+}
+
+func (m *Model) backScreen() bool {
+	if len(m.history) == 0 {
+		return false
+	}
+	prev := m.history[len(m.history)-1]
+	m.history = m.history[:len(m.history)-1]
+	m.screen = prev
+	return true
 }
 
 func (m Model) Init() tea.Cmd {
@@ -80,11 +125,91 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	persist := true
 	defer func() {
-		_ = m.saveState()
+		if persist {
+			_ = m.saveState()
+		}
 	}()
+
+	if m.loading {
+		switch msg := msg.(type) {
+		case spinner.TickMsg:
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			persist = false
+			return m, cmd
+		case remoteOptionsLoadedMsg:
+			if msg.token != m.loadingToken {
+				persist = false
+				return m, nil
+			}
+			m.loading = false
+			m.loadingMessage = ""
+			if msg.err != nil {
+				m.Err = msg.err
+				return m, nil
+			}
+			m.RefOptions = msg.options
+			m.RemoteIndex = 0
+			m.RefIndex = 0
+			m.setScreen("ref_select")
+			return m, nil
+		case commitsLoadedMsg:
+			if msg.token != m.loadingToken {
+				persist = false
+				return m, nil
+			}
+			m.loading = false
+			m.loadingMessage = ""
+			if msg.err != nil {
+				m.Err = msg.err
+				return m, nil
+			}
+			m.CompareFrom = msg.compareFrom
+			m.Commits = msg.commits
+			m.CommitIndex = 0
+			m.setScreen("commit_select")
+			return m, nil
+		case checkoutOptionsLoadedMsg:
+			if msg.token != m.loadingToken {
+				persist = false
+				return m, nil
+			}
+			m.loading = false
+			m.loadingMessage = ""
+			if msg.err != nil {
+				m.Err = msg.err
+				return m, nil
+			}
+			m.CheckoutOptions = msg.options
+			m.CheckoutIndex = 0
+			m.setScreen("checkout_select")
+			return m, nil
+		case tea.KeyMsg:
+			if msg.Type == tea.KeyEsc {
+				m.cancelLoading()
+				return m, nil
+			}
+			if msg.Type == tea.KeyCtrlC {
+				return m, tea.Quit
+			}
+			persist = false
+			return m, nil
+		default:
+			persist = false
+			return m, nil
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if msg.Type == tea.KeyEsc {
+			if m.backScreen() {
+				return m, nil
+			}
+			return m, nil
+		}
 		if m.screen == "commit_select" && m.isOpenPRShortcut(msg) {
 			if err := m.openFocusedPR(context.Background()); err != nil {
 				m.Err = err
@@ -102,7 +227,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.Remotes = remotes
-				m.screen = "remote_select"
+				m.Err = nil
+				m.setScreen("remote_select")
 				m.RemoteIndex = 0
 				return m, nil
 			}
@@ -112,54 +238,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.Err = errors.New("no git remotes found")
 					return m, nil
 				}
-				if err := m.Git.Fetch(context.Background(), m.WorkDir, remote); err != nil {
-					m.Err = err
-					return m, nil
-				}
-				options, err := m.loadRefOptions(context.Background(), remote)
-				if err != nil {
-					m.Err = err
-					return m, nil
-				}
-				m.RefOptions = options
-				m.screen = "ref_select"
-				m.RefIndex = 0
-				return m, nil
+				token := m.beginLoading(fmt.Sprintf("Fetching %s and loading refs...", remote))
+				return m, m.loadRemoteOptionsCmd(token, remote)
 			}
 			if m.screen == "ref_select" {
 				if len(m.RefOptions) == 0 {
 					m.Err = errors.New("no compare refs found")
 					return m, nil
 				}
-				m.CompareFrom = m.selectedRef()
-				commits, err := m.Git.LogRange(context.Background(), m.WorkDir, m.CompareFrom, "HEAD")
-				if err != nil {
-					m.Err = err
-					return m, nil
-				}
-				commits = m.enrichCommitsWithPRs(commits)
-				m.Commits = commits
-				m.CommitIndex = 0
-				m.screen = "commit_select"
-				return m, nil
+				compareFrom := m.selectedRef()
+				token := m.beginLoading(fmt.Sprintf("Loading commits from %s...", compareFrom))
+				return m, m.loadCommitsCmd(token, compareFrom)
 			}
 			if m.screen == "commit_select" {
-				options, err := m.loadCheckoutOptions(context.Background())
-				if err != nil {
-					m.Err = err
-					return m, nil
-				}
-				m.CheckoutOptions = options
-				m.CheckoutIndex = 0
-				m.screen = "checkout_select"
-				return m, nil
+				token := m.beginLoading("Loading checkout targets...")
+				return m, m.loadCheckoutOptionsCmd(token)
 			}
 			if m.screen == "checkout_select" {
 				if err := m.handleCheckoutEnter(); err != nil {
 					m.Err = err
 					return m, nil
 				}
-				m.screen = "done"
+				m.Err = nil
+				m.setScreen("done")
 				return m, nil
 			}
 			if m.screen == "cherry_pick_progress" {
@@ -167,11 +268,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.Err = err
 					return m, nil
 				}
-				m.screen = "versioning"
+				m.Err = nil
+				m.setScreen("versioning")
 				return m, nil
 			}
 			if m.screen == "versioning" {
-				m.screen = "push_select"
+				m.Err = nil
+				m.setScreen("push_select")
 				return m, nil
 			}
 			if m.screen == "push_select" {
@@ -179,7 +282,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.Err = err
 					return m, nil
 				}
-				m.screen = "tag_select"
+				m.Err = nil
+				m.setScreen("tag_select")
 				return m, nil
 			}
 			if m.screen == "tag_select" {
@@ -187,7 +291,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.Err = err
 					return m, nil
 				}
-				m.screen = "release_select"
+				m.Err = nil
+				m.setScreen("release_select")
 				return m, nil
 			}
 			if m.screen == "release_select" {
@@ -195,7 +300,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.Err = err
 					return m, nil
 				}
-				m.screen = "done"
+				m.Err = nil
+				m.setScreen("done")
 				return m, nil
 			}
 		case tea.KeyUp:
@@ -276,17 +382,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "p":
 				if m.screen == "versioning" {
-					m.screen = "push_select"
+					m.setScreen("push_select")
 					return m, nil
 				}
 			case "t":
 				if m.screen == "push_select" {
-					m.screen = "tag_select"
+					m.setScreen("tag_select")
 					return m, nil
 				}
 			case "l":
 				if m.screen == "tag_select" {
-					m.screen = "release_select"
+					m.setScreen("release_select")
 					return m, nil
 				}
 			case "o":
@@ -309,6 +415,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
+	if m.Err != nil && !m.loading {
+		return renderScreen(
+			"Error",
+			"Something went wrong.",
+			renderError(m.Err),
+			[]string{"esc  back", "q  quit"},
+		)
+	}
+	if m.loading {
+		return m.renderLoadingView()
+	}
 	switch m.screen {
 	case "welcome":
 		return renderScreen(
@@ -441,20 +558,70 @@ func (m Model) View() string {
 			[]string{"q  quit"},
 		)
 	default:
-		if m.Err != nil {
-			return renderScreen(
-				"Error",
-				"Something went wrong.",
-				renderError(m.Err),
-				[]string{"q  quit"},
-			)
-		}
 		return renderScreen(
 			"Patchflow",
 			"",
 			"Press q to quit.",
 			[]string{"q  quit"},
 		)
+	}
+}
+
+func (m Model) renderLoadingView() string {
+	return renderScreen(
+		"Loading",
+		m.loadingMessage,
+		strings.TrimSpace(m.spinner.View())+"\n\nPress esc to cancel.",
+		[]string{"esc  back", "ctrl+c  quit"},
+	)
+}
+
+func newLoadingSpinner() spinner.Model {
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	return s
+}
+
+func (m *Model) beginLoading(message string) int {
+	m.loading = true
+	m.loadingMessage = message
+	m.Err = nil
+	m.loadingToken++
+	return m.loadingToken
+}
+
+func (m *Model) cancelLoading() {
+	m.loading = false
+	m.loadingMessage = ""
+	m.loadingToken++
+}
+
+func (m Model) loadRemoteOptionsCmd(token int, remote string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		if err := m.Git.Fetch(ctx, m.WorkDir, remote); err != nil {
+			return remoteOptionsLoadedMsg{token: token, remote: remote, err: err}
+		}
+		options, err := m.loadRefOptions(ctx, remote)
+		return remoteOptionsLoadedMsg{token: token, remote: remote, options: options, err: err}
+	}
+}
+
+func (m Model) loadCommitsCmd(token int, compareFrom string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		commits, err := m.Git.LogRange(ctx, m.WorkDir, compareFrom, "HEAD")
+		if err == nil {
+			commits = m.enrichCommitsWithPRs(commits)
+		}
+		return commitsLoadedMsg{token: token, compareFrom: compareFrom, commits: commits, err: err}
+	}
+}
+
+func (m Model) loadCheckoutOptionsCmd(token int) tea.Cmd {
+	return func() tea.Msg {
+		options, err := m.loadCheckoutOptions(context.Background())
+		return checkoutOptionsLoadedMsg{token: token, options: options, err: err}
 	}
 }
 
