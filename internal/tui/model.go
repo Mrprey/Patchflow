@@ -55,6 +55,9 @@ type Model struct {
 	CommitIndex      int
 	CheckoutOptions  []string
 	CheckoutIndex    int
+	CherryPickIndex  int
+	CherryPickCommit git.Commit
+	CherryPickErr    error
 	NewBranchName    string
 	NewBranchBase    string
 	BranchName       string
@@ -96,6 +99,19 @@ type checkoutOptionsLoadedMsg struct {
 	token   int
 	options []string
 	err     error
+}
+
+type cherryPickAppliedMsg struct {
+	token   int
+	commits []git.Commit
+	err     error
+}
+
+type cherryPickConflictMsg struct {
+	token  int
+	index  int
+	commit git.Commit
+	err    error
 }
 
 func (m Model) ScreenName() string {
@@ -186,6 +202,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.CheckoutIndex = 0
 			m.setScreen("checkout_select")
 			return m, nil
+		case cherryPickAppliedMsg:
+			if msg.token != m.loadingToken {
+				persist = false
+				return m, nil
+			}
+			m.loading = false
+			m.loadingMessage = ""
+			if msg.err != nil {
+				m.Err = msg.err
+				return m, nil
+			}
+			if len(msg.commits) > 0 {
+				m.Commits = msg.commits
+			}
+			m.Err = nil
+			m.setScreen("versioning")
+			return m, nil
+		case cherryPickConflictMsg:
+			if msg.token != m.loadingToken {
+				persist = false
+				return m, nil
+			}
+			m.loading = false
+			m.loadingMessage = ""
+			m.CherryPickIndex = msg.index
+			m.CherryPickCommit = msg.commit
+			m.CherryPickErr = msg.err
+			m.Err = nil
+			m.setScreen("cherry_pick_conflict")
+			return m, nil
 		case tea.KeyMsg:
 			if msg.Type == tea.KeyEsc {
 				m.cancelLoading()
@@ -204,6 +250,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if msg.String() == "q" {
+			return m, tea.Quit
+		}
 		if msg.Type == tea.KeyEsc {
 			if m.backScreen() {
 				return m, nil
@@ -239,7 +288,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				token := m.beginLoading(fmt.Sprintf("Fetching %s and loading refs...", remote))
-				return m, m.loadRemoteOptionsCmd(token, remote)
+				return m, tea.Batch(m.spinner.Tick, m.loadRemoteOptionsCmd(token, remote))
 			}
 			if m.screen == "ref_select" {
 				if len(m.RefOptions) == 0 {
@@ -248,29 +297,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				compareFrom := m.selectedRef()
 				token := m.beginLoading(fmt.Sprintf("Loading commits from %s...", compareFrom))
-				return m, m.loadCommitsCmd(token, compareFrom)
+				return m, tea.Batch(m.spinner.Tick, m.loadCommitsCmd(token, compareFrom))
 			}
 			if m.screen == "commit_select" {
 				token := m.beginLoading("Loading checkout targets...")
-				return m, m.loadCheckoutOptionsCmd(token)
+				return m, tea.Batch(m.spinner.Tick, m.loadCheckoutOptionsCmd(token))
 			}
 			if m.screen == "checkout_select" {
 				if err := m.handleCheckoutEnter(); err != nil {
 					m.Err = err
 					return m, nil
 				}
-				m.Err = nil
-				m.setScreen("done")
-				return m, nil
+				selected := m.selectedCommits()
+				if len(selected) == 0 {
+					m.Err = nil
+					m.setScreen("versioning")
+					return m, nil
+				}
+				m.setScreen("cherry_pick_progress")
+				token := m.beginLoading("Applying selected commits...")
+				return m, tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, 0))
 			}
 			if m.screen == "cherry_pick_progress" {
-				if err := m.applySelectedCommits(); err != nil {
+				token := m.beginLoading("Applying selected commits...")
+				return m, tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, 0))
+			}
+			if m.screen == "cherry_pick_conflict" {
+				if err := m.cherryPickContinueSelectedCommit(); err != nil {
 					m.Err = err
 					return m, nil
 				}
-				m.Err = nil
-				m.setScreen("versioning")
-				return m, nil
+				if len(m.selectedCommits()) == 0 {
+					m.Err = nil
+					m.setScreen("versioning")
+					return m, nil
+				}
+				m.setScreen("cherry_pick_progress")
+				token := m.beginLoading("Applying selected commits...")
+				return m, tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, 0))
 			}
 			if m.screen == "versioning" {
 				m.Err = nil
@@ -402,6 +466,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, nil
 				}
+			case "c":
+				if m.screen == "cherry_pick_conflict" {
+					if err := m.cherryPickContinueSelectedCommit(); err != nil {
+						m.Err = err
+						return m, nil
+					}
+					if len(m.selectedCommits()) == 0 {
+						m.Err = nil
+						m.setScreen("versioning")
+						return m, nil
+					}
+					m.setScreen("cherry_pick_progress")
+					token := m.beginLoading("Applying selected commits...")
+					return m, tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, 0))
+				}
+			case "s":
+				if m.screen == "cherry_pick_conflict" {
+					if err := m.cherryPickSkipSelectedCommit(); err != nil {
+						m.Err = err
+						return m, nil
+					}
+					if len(m.selectedCommits()) == 0 {
+						m.Err = nil
+						m.setScreen("versioning")
+						return m, nil
+					}
+					m.setScreen("cherry_pick_progress")
+					token := m.beginLoading("Applying selected commits...")
+					return m, tea.Batch(m.spinner.Tick, m.applySelectedCommitsCmd(token, 0))
+				}
+			case "a":
+				if m.screen == "cherry_pick_conflict" {
+					if err := m.cherryPickAbort(); err != nil {
+						m.Err = err
+						return m, nil
+					}
+					return m, nil
+				}
 			}
 		default:
 			if msg.String() == "q" {
@@ -518,43 +620,57 @@ func (m Model) View() string {
 	case "cherry_pick_progress":
 		return renderScreen(
 			"Cherry-pick",
-			"Cherry-pick phase is not wired into this UI pass yet.",
-			"UI work for this stage comes next.",
-			[]string{"q  quit"},
+			"Applying selected commits to the checkout target.",
+			"Loading overlay shows the current operation while Git works.",
+			[]string{"esc  back", "q  quit"},
+		)
+	case "cherry_pick_conflict":
+		conflictText := "The cherry-pick stopped on a conflict."
+		if m.CherryPickErr != nil {
+			conflictText = conflictText + "\n\n" + renderError(m.CherryPickErr)
+		}
+		if strings.TrimSpace(m.CherryPickCommit.ShortSHA) != "" || strings.TrimSpace(m.CherryPickCommit.Title) != "" {
+			conflictText += fmt.Sprintf("\n\n%s %s", m.CherryPickCommit.ShortSHA, m.CherryPickCommit.Title)
+		}
+		return renderScreen(
+			"Cherry-pick conflict",
+			"Resolve the files manually, then continue, skip, or abort.",
+			conflictText,
+			[]string{"e  editor", "c  continue", "s  skip", "a  abort", "esc  back"},
 		)
 	case "versioning":
 		return renderScreen(
 			"Versioning",
-			"Versioning step is not wired into this UI pass yet.",
-			"Manual release bump stays out of this pass.",
-			[]string{"q  quit"},
+			"Update versioning files before continuing.",
+			"Press e to open the editor, r to run validation, or enter to continue.",
+			[]string{"e  editor", "r  validate", "enter  continue", "esc  back"},
 		)
 	case "push_select":
 		return renderScreen(
 			"Push",
-			"Push step is not wired into this UI pass yet.",
-			"Branch push UI comes later.",
-			[]string{"q  quit"},
+			"Push the current branch to the configured remote.",
+			"Press enter to run git push.",
+			[]string{"enter  push", "esc  back", "q  quit"},
 		)
 	case "tag_select":
 		return renderScreen(
 			"Tag",
-			"Tag step is not wired into this UI pass yet.",
-			"Tag creation UI comes later.",
-			[]string{"q  quit"},
+			"Create and push the release tag.",
+			"Press enter to create the annotated tag.",
+			[]string{"enter  tag", "esc  back", "q  quit"},
 		)
 	case "release_select":
 		return renderScreen(
 			"Release",
-			"Release step is not wired into this UI pass yet.",
-			"Draft release UI comes later.",
-			[]string{"q  quit"},
+			"Generate release notes and create the GitHub draft.",
+			"Press enter to write notes and publish the draft release.",
+			[]string{"enter  release", "esc  back", "q  quit"},
 		)
 	case "done":
 		return renderScreen(
 			"Done",
 			"UI flow complete.",
-			"Cherry-pick phase comes next.",
+			"All requested steps finished.",
 			[]string{"q  quit"},
 		)
 	default:
@@ -572,7 +688,7 @@ func (m Model) renderLoadingView() string {
 		"Loading",
 		m.loadingMessage,
 		strings.TrimSpace(m.spinner.View())+"\n\nPress esc to cancel.",
-		[]string{"esc  back", "ctrl+c  quit"},
+		[]string{"esc  back", "q  quit", "ctrl+c  quit"},
 	)
 }
 
@@ -586,6 +702,7 @@ func (m *Model) beginLoading(message string) int {
 	m.loading = true
 	m.loadingMessage = message
 	m.Err = nil
+	m.spinner = newLoadingSpinner()
 	m.loadingToken++
 	return m.loadingToken
 }
@@ -768,17 +885,78 @@ func (m Model) loadCheckoutOptions(ctx context.Context) ([]string, error) {
 	return mergeUnique(branches, tags), nil
 }
 
-func (m Model) applySelectedCommits() error {
+func (m Model) applySelectedCommitsCmd(token int, startSelectedIndex int) tea.Cmd {
+	return func() tea.Msg {
+		commits := append([]git.Commit(nil), m.Commits...)
+		selectedIndex := 0
+		for i := range commits {
+			if !commits[i].Selected {
+				continue
+			}
+			if selectedIndex < startSelectedIndex {
+				selectedIndex++
+				continue
+			}
+			if _, err := m.runLogged(context.Background(), "git", "cherry-pick", commits[i].SHA); err != nil {
+				commits[i].Status = "failed"
+				return cherryPickConflictMsg{
+					token:  token,
+					index:  selectedIndex,
+					commit: commits[i],
+					err:    err,
+				}
+			}
+			commits[i].Status = "applied"
+			commits[i].Selected = false
+			selectedIndex++
+		}
+		return cherryPickAppliedMsg{token: token, commits: commits}
+	}
+}
+
+func (m *Model) cherryPickContinueSelectedCommit() error {
+	_, err := m.runLogged(context.Background(), "git", "cherry-pick", "--continue")
+	if err != nil {
+		return err
+	}
+	m.markCommitBySHA(m.CherryPickCommit.SHA, "applied", false)
+	m.CherryPickErr = nil
+	m.loadingMessage = ""
+	m.Err = nil
+	return nil
+}
+
+func (m *Model) cherryPickSkipSelectedCommit() error {
+	_, err := m.runLogged(context.Background(), "git", "cherry-pick", "--skip")
+	if err != nil {
+		return err
+	}
+	m.markCommitBySHA(m.CherryPickCommit.SHA, "skipped", false)
+	m.CherryPickErr = nil
+	m.Err = nil
+	return nil
+}
+
+func (m *Model) cherryPickAbort() error {
+	_, err := m.runLogged(context.Background(), "git", "cherry-pick", "--abort")
+	if err != nil {
+		return err
+	}
+	m.CherryPickErr = nil
+	m.Err = nil
+	m.setScreen("checkout_select")
+	return nil
+}
+
+func (m *Model) markCommitBySHA(sha, status string, selected bool) {
 	for i := range m.Commits {
-		if !m.Commits[i].Selected {
+		if m.Commits[i].SHA != sha {
 			continue
 		}
-		if _, err := m.runLogged(context.Background(), "git", "cherry-pick", m.Commits[i].SHA); err != nil {
-			return err
-		}
-		m.Commits[i].Status = "applied"
+		m.Commits[i].Status = status
+		m.Commits[i].Selected = selected
+		return
 	}
-	return nil
 }
 
 func (m *Model) handlePushEnter() error {

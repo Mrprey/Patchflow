@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"patchflow/internal/config"
@@ -166,6 +167,30 @@ func TestEscCancelsLoadingAndKeepsOriginScreen(t *testing.T) {
 	}
 }
 
+func TestRuneQQuitsFromNormalScreens(t *testing.T) {
+	m := New(Options{Config: configDefaultForTest()})
+
+	_, cmd := m.Update(keyMsgRune("q"))
+	if cmd == nil {
+		t.Fatal("cmd = nil, want quit")
+	}
+}
+
+func TestSpinnerTickWhileLoadingSchedulesNextFrame(t *testing.T) {
+	m := New(Options{Config: configDefaultForTest()})
+	m.loading = true
+	m.loadingMessage = "Loading commits..."
+
+	next, cmd := m.Update(spinner.TickMsg{})
+	got := next.(Model)
+	if got.ScreenName() != "welcome" {
+		t.Fatalf("ScreenName() = %q, want welcome while loading", got.ScreenName())
+	}
+	if cmd == nil {
+		t.Fatalf("cmd = nil, want next spinner tick")
+	}
+}
+
 func TestEscOnWelcomeStaysOnWelcome(t *testing.T) {
 	m := New(Options{Config: configDefaultForTest()})
 
@@ -194,8 +219,7 @@ func TestEscReturnsBackThroughFlowWithoutLosingState(t *testing.T) {
 	if got.ScreenName() != "remote_select" {
 		t.Fatalf("ScreenName() = %q, want remote_select while loading", got.ScreenName())
 	}
-	next, _ = got.Update(cmd())
-	got = next.(Model)
+	got = applyCmd(t, got, cmd)
 	if got.ScreenName() != "ref_select" {
 		t.Fatalf("ScreenName() = %q, want ref_select", got.ScreenName())
 	}
@@ -259,8 +283,7 @@ func TestRemoteSelectMovesFocusAndFetchesSelectedRemote(t *testing.T) {
 	if got.ScreenName() != "remote_select" {
 		t.Fatalf("ScreenName() = %q, want remote_select while loading", got.ScreenName())
 	}
-	next, _ = got.Update(cmd())
-	got = next.(Model)
+	got = applyCmd(t, got, cmd)
 	if got.ScreenName() != "ref_select" {
 		t.Fatalf("ScreenName() = %q, want ref_select", got.ScreenName())
 	}
@@ -299,8 +322,7 @@ func TestRefSelectMovesAndChoosesBase(t *testing.T) {
 	if got.ScreenName() != "ref_select" {
 		t.Fatalf("ScreenName() = %q, want ref_select while loading", got.ScreenName())
 	}
-	next, _ = got.Update(cmd())
-	got = next.(Model)
+	got = applyCmd(t, got, cmd)
 	if got.CompareFrom != "upstream/release/1.2.0" {
 		t.Fatalf("CompareFrom = %q, want upstream/release/1.2.0", got.CompareFrom)
 	}
@@ -328,8 +350,7 @@ func TestRefSelectLoadsCommitsIntoCommitSelect(t *testing.T) {
 	if got.ScreenName() != "ref_select" {
 		t.Fatalf("ScreenName() = %q, want ref_select while loading", got.ScreenName())
 	}
-	next, _ = got.Update(cmd())
-	got = next.(Model)
+	got = applyCmd(t, got, cmd)
 	if got.ScreenName() != "commit_select" {
 		t.Fatalf("ScreenName() = %q, want commit_select", got.ScreenName())
 	}
@@ -360,8 +381,7 @@ func TestRemoteSelectLoadsRealRefsAndAdvancesToRefSelect(t *testing.T) {
 	if got.ScreenName() != "remote_select" {
 		t.Fatalf("ScreenName() = %q, want remote_select while loading", got.ScreenName())
 	}
-	next, _ = got.Update(cmd())
-	got = next.(Model)
+	got = applyCmd(t, got, cmd)
 	if got.ScreenName() != "ref_select" {
 		t.Fatalf("ScreenName() = %q, want ref_select", got.ScreenName())
 	}
@@ -394,8 +414,7 @@ func TestRefSelectEnrichesCommitsWithPRData(t *testing.T) {
 	if got.ScreenName() != "ref_select" {
 		t.Fatalf("ScreenName() = %q, want ref_select while loading", got.ScreenName())
 	}
-	next, _ = got.Update(cmd())
-	got = next.(Model)
+	got = applyCmd(t, got, cmd)
 	if got.Commits[0].PRNumber != 123 || got.Commits[0].PRURL == "" || len(got.Commits[0].Labels) != 2 {
 		t.Fatalf("Commits = %#v", got.Commits[0])
 	}
@@ -455,8 +474,7 @@ func TestCommitSelectEnterAdvancesToCheckoutSelect(t *testing.T) {
 	if got.ScreenName() != "commit_select" {
 		t.Fatalf("ScreenName() = %q, want commit_select while loading", got.ScreenName())
 	}
-	next, _ = got.Update(cmd())
-	got = next.(Model)
+	got = applyCmd(t, got, cmd)
 	if got.ScreenName() != "checkout_select" {
 		t.Fatalf("ScreenName() = %q, want checkout_select", got.ScreenName())
 	}
@@ -531,8 +549,8 @@ func TestCheckoutSelectChoosesExistingBranch(t *testing.T) {
 
 	next, _ := m.Update(keyMsgEnter())
 	got := next.(Model)
-	if got.ScreenName() != "done" {
-		t.Fatalf("ScreenName() = %q, want done", got.ScreenName())
+	if got.ScreenName() != "versioning" {
+		t.Fatalf("ScreenName() = %q, want versioning", got.ScreenName())
 	}
 	if len(runner.calls) != 1 || runner.calls[0] != "git checkout release/1.2.0" {
 		t.Fatalf("calls = %#v", runner.calls)
@@ -560,8 +578,7 @@ func TestCommitSelectLoadsCheckoutTargetsBeforeAdvancing(t *testing.T) {
 	if got.ScreenName() != "commit_select" {
 		t.Fatalf("ScreenName() = %q, want commit_select while loading", got.ScreenName())
 	}
-	next, _ = got.Update(cmd())
-	got = next.(Model)
+	got = applyCmd(t, got, cmd)
 	if got.ScreenName() != "checkout_select" {
 		t.Fatalf("ScreenName() = %q, want checkout_select", got.ScreenName())
 	}
@@ -589,12 +606,61 @@ func TestCherryPickProgressAppliesSelectedCommitsAndMovesToVersioning(t *testing
 		{SHA: "sha2", ShortSHA: "short2", Title: "Update docs", Selected: true},
 	}
 
-	next, _ := m.Update(keyMsgEnter())
+	next, cmd := m.Update(keyMsgEnter())
 	got := next.(Model)
+	if got.ScreenName() != "cherry_pick_progress" {
+		t.Fatalf("ScreenName() = %q, want cherry_pick_progress while loading", got.ScreenName())
+	}
+	got = applyCmd(t, got, cmd)
 	if got.ScreenName() != "versioning" {
 		t.Fatalf("ScreenName() = %q, want versioning", got.ScreenName())
 	}
 	if len(runner.calls) != 2 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+}
+
+func TestCherryPickConflictContinueResumesRemainingCommits(t *testing.T) {
+	runner := &recordingRunner{
+		outputs: map[string]string{
+			"git cherry-pick --continue": "",
+			"git cherry-pick sha2":       "",
+		},
+		errs: map[string]error{
+			"git cherry-pick sha1": errors.New("merge conflict"),
+		},
+	}
+	m := New(Options{
+		WorkDir: "/tmp/repo",
+		Config:  configDefaultForTest(),
+		Git:     git.NewClient(runner),
+	})
+	m.screen = "cherry_pick_progress"
+	m.Commits = []git.Commit{
+		{SHA: "sha1", ShortSHA: "short1", Title: "Fix login", Selected: true},
+		{SHA: "sha2", ShortSHA: "short2", Title: "Update docs", Selected: true},
+	}
+
+	next, cmd := m.Update(keyMsgEnter())
+	got := next.(Model)
+	got = applyCmd(t, got, cmd)
+	if got.ScreenName() != "cherry_pick_conflict" {
+		t.Fatalf("ScreenName() = %q, want cherry_pick_conflict", got.ScreenName())
+	}
+	if got.CherryPickCommit.SHA != "sha1" || got.CherryPickErr == nil {
+		t.Fatalf("Conflict = %#v err=%v", got.CherryPickCommit, got.CherryPickErr)
+	}
+
+	next, cmd = got.Update(keyMsgRune("c"))
+	got = next.(Model)
+	if got.ScreenName() != "cherry_pick_progress" {
+		t.Fatalf("ScreenName() = %q, want cherry_pick_progress while loading", got.ScreenName())
+	}
+	got = applyCmd(t, got, cmd)
+	if got.ScreenName() != "versioning" {
+		t.Fatalf("ScreenName() = %q, want versioning", got.ScreenName())
+	}
+	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 }
@@ -713,6 +779,25 @@ func keyMsgRune(value string) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(value)}
 }
 
+func applyCmd(t *testing.T, m Model, cmd tea.Cmd) Model {
+	t.Helper()
+	msg := cmd()
+	switch msg := msg.(type) {
+	case tea.BatchMsg:
+		for _, sub := range msg {
+			if sub == nil {
+				continue
+			}
+			next, _ := m.Update(sub())
+			m = next.(Model)
+		}
+		return m
+	default:
+		next, _ := m.Update(msg)
+		return next.(Model)
+	}
+}
+
 type fakeRunner struct {
 	outputs map[string]string
 	errs    map[string]error
@@ -731,12 +816,19 @@ func (f fakeRunner) Run(_ context.Context, _ string, name string, args ...string
 
 type recordingRunner struct {
 	outputs map[string]string
+	errs    map[string]error
 	calls   []string
 }
 
 func (r *recordingRunner) Run(_ context.Context, _ string, name string, args ...string) (string, error) {
 	key := strings.TrimSpace(name + " " + strings.Join(args, " "))
 	r.calls = append(r.calls, key)
+	if err, ok := r.errs[key]; ok {
+		if out, ok := r.outputs[key]; ok {
+			return out, err
+		}
+		return "", err
+	}
 	if out, ok := r.outputs[key]; ok {
 		return out, nil
 	}

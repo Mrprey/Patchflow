@@ -23,24 +23,24 @@ import (
 )
 
 type Options struct {
-	Args     []string
-	WorkDir  string
-	Stdin    io.Reader
-	Stdout   io.Writer
-	Stderr   io.Writer
-	Config   string
-	Runner   execx.Runner
+	Args    []string
+	WorkDir string
+	Stdin   io.Reader
+	Stdout  io.Writer
+	Stderr  io.Writer
+	Config  string
+	Runner  execx.Runner
 }
 
 type App struct {
-	args   []string
-	workDir string
-	in     io.Reader
-	out    io.Writer
-	errOut io.Writer
-	cfg    config.Config
-	cfgPath string
-	runner execx.Runner
+	args       []string
+	workDir    string
+	in         io.Reader
+	out        io.Writer
+	errOut     io.Writer
+	cfg        config.Config
+	cfgPath    string
+	runner     execx.Runner
 	newProgram func(tea.Model, ...tea.ProgramOption) teaProgram
 }
 
@@ -50,13 +50,13 @@ func New(opts Options) *App {
 		r = execx.CommandRunner{}
 	}
 	return &App{
-		args:   opts.Args,
+		args:    opts.Args,
 		workDir: opts.WorkDir,
-		in:     opts.Stdin,
-		out:    opts.Stdout,
-		errOut: opts.Stderr,
+		in:      opts.Stdin,
+		out:     opts.Stdout,
+		errOut:  opts.Stderr,
 		cfgPath: opts.Config,
-		runner: r,
+		runner:  r,
 		newProgram: func(model tea.Model, opts ...tea.ProgramOption) teaProgram {
 			return tea.NewProgram(model, opts...)
 		},
@@ -156,6 +156,34 @@ func (a *App) resume() error {
 		return err
 	}
 	_, err = fmt.Fprintf(a.out, "Current step: %s\n", state.CurrentStep)
+	if err != nil {
+		return err
+	}
+	if state.Remote != "" {
+		if _, err = fmt.Fprintf(a.out, "Remote: %s\n", state.Remote); err != nil {
+			return err
+		}
+	}
+	if state.CompareFrom != "" || state.CompareTo != "" {
+		if _, err = fmt.Fprintf(a.out, "Compare: %s...%s\n", state.CompareFrom, state.CompareTo); err != nil {
+			return err
+		}
+	}
+	if state.BranchName != "" {
+		if _, err = fmt.Fprintf(a.out, "Branch: %s\n", state.BranchName); err != nil {
+			return err
+		}
+	}
+	if state.TagName != "" {
+		if _, err = fmt.Fprintf(a.out, "Tag: %s\n", state.TagName); err != nil {
+			return err
+		}
+	}
+	if len(state.SelectedCommits) > 0 {
+		if _, err = fmt.Fprintf(a.out, "Selected commits: %d\n", len(state.SelectedCommits)); err != nil {
+			return err
+		}
+	}
 	return err
 }
 
