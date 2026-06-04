@@ -1,0 +1,13 @@
+default_remote: upstream
+default_push_remote: origin
+editor: "code --wait"
+post_cherry_pick_command: "flutter analyze"
+release_notes_file: ".patchflow/release-notes.md"
+
+versioning:
+  suggested_files:
+    - pubspec.yaml
+    - package.json
+    - CHANGELOG.md
+    - ios/Runner/Info.plist
+    - android/app/build.gradle
