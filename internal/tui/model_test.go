@@ -575,8 +575,16 @@ func TestCommitSelectFiltersByTypingAndEscClearsFilter(t *testing.T) {
 		{ShortSHA: "short3", Title: "Fix logout"},
 	}
 
-	next, _ := m.Update(keyMsgRune("login"))
+	next, _ := m.Update(keyMsgRune("l"))
 	got := next.(Model)
+	next, _ = got.Update(keyMsgRune("o"))
+	got = next.(Model)
+	next, _ = got.Update(keyMsgRune("g"))
+	got = next.(Model)
+	next, _ = got.Update(keyMsgRune("i"))
+	got = next.(Model)
+	next, _ = got.Update(keyMsgRune("n"))
+	got = next.(Model)
 	if len(got.filteredCommitIndexes()) != 1 {
 		t.Fatalf("filteredCommitIndexes = %#v", got.filteredCommitIndexes())
 	}
@@ -594,8 +602,10 @@ func TestRemoteSelectFiltersByTyping(t *testing.T) {
 	m.Remotes = []git.Remote{{Name: "origin"}, {Name: "upstream"}}
 	m.Height = 12
 
-	next, _ := m.Update(keyMsgRune("up"))
+	next, _ := m.Update(keyMsgRune("u"))
 	got := next.(Model)
+	next, _ = got.Update(keyMsgRune("p"))
+	got = next.(Model)
 	if got.RemoteFilter != "up" {
 		t.Fatalf("RemoteFilter = %q, want %q", got.RemoteFilter, "up")
 	}
@@ -642,26 +652,6 @@ func TestCommitSelectShiftDownSelectsInterval(t *testing.T) {
 	}
 }
 
-func TestCommitSelectVRangesFromAnchor(t *testing.T) {
-	m := New(Options{Config: configDefaultForTest()})
-	m.screen = "commit_select"
-	m.Commits = []git.Commit{
-		{ShortSHA: "short1", Title: "Fix login"},
-		{ShortSHA: "short2", Title: "Update docs"},
-		{ShortSHA: "short3", Title: "Fix logout"},
-	}
-
-	next, _ := m.Update(keyMsgDown())
-	got := next.(Model)
-	next, _ = got.Update(keyMsgDown())
-	got = next.(Model)
-	next, _ = got.Update(keyMsgRune("v"))
-	got = next.(Model)
-	if !got.Commits[0].Selected || !got.Commits[1].Selected || !got.Commits[2].Selected {
-		t.Fatalf("Commits = %#v", got.Commits)
-	}
-}
-
 func TestCheckoutSelectShowsTargets(t *testing.T) {
 	m := New(Options{Config: configDefaultForTest()})
 	m.screen = "checkout_select"
@@ -701,8 +691,8 @@ func TestCheckoutSelectChoosesExistingBranch(t *testing.T) {
 func TestCheckoutSelectCreatesNewBranchFromBase(t *testing.T) {
 	runner := &recordingRunner{outputs: map[string]string{
 		"git for-each-ref --format=%(refname:short) refs/heads": "main\nrelease/1.2.0\n",
-		"git tag --list": "v1.2.0\nv1.2.1\n",
-		"git branch --list release/1.2.1": "",
+		"git tag --list":                       "v1.2.0\nv1.2.1\n",
+		"git branch --list release/1.2.1":      "",
 		"git checkout -b release/1.2.1 v1.2.0": "",
 	}}
 	m := New(Options{
@@ -941,11 +931,11 @@ func TestVersioningKeysAndContinue(t *testing.T) {
 
 func TestPushTagAndReleaseFlow(t *testing.T) {
 	runner := &recordingRunner{outputs: map[string]string{
-		"git push origin release/1.2.1":          "",
-		"git tag --list v1.2.2":                  "",
-		"git ls-remote --tags origin v1.2.2":     "",
-		"git tag -a v1.2.2 -m v1.2.2":            "",
-		"git push origin v1.2.2":                 "",
+		"git push origin release/1.2.1":      "",
+		"git tag --list v1.2.2":              "",
+		"git ls-remote --tags origin v1.2.2": "",
+		"git tag -a v1.2.2 -m v1.2.2":        "",
+		"git push origin v1.2.2":             "",
 		"gh release create v1.2.2 --target release/1.2.1 --title v1.2.2-rc1 --notes-file /tmp/repo/.patchflow/release-notes.md --draft": "",
 	}}
 	m := New(Options{

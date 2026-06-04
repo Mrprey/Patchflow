@@ -3,6 +3,8 @@ package tui
 import (
 	"strconv"
 	"strings"
+
+	"github.com/sahilm/fuzzy"
 )
 
 type CommitOption struct {
@@ -15,9 +17,9 @@ type CommitOption struct {
 }
 
 type SelectionModel struct {
-	Items   []CommitOption
-	Filter  string
-	Focus   int
+	Items  []CommitOption
+	Filter string
+	Focus  int
 }
 
 func (m *SelectionModel) Toggle(index int) {
@@ -54,32 +56,20 @@ func (m SelectionModel) FilteredItems() []CommitOption {
 	if query == "" {
 		return append([]CommitOption(nil), m.Items...)
 	}
-	filtered := make([]CommitOption, 0, len(m.Items))
+	labels := make([]string, 0, len(m.Items))
 	for _, item := range m.Items {
-		if matchesFilter(item, query) {
-			filtered = append(filtered, item)
-		}
+		labels = append(labels, searchableCommitOption(item))
+	}
+	matches := fuzzy.Find(query, labels)
+	filtered := make([]CommitOption, 0, len(matches))
+	for _, match := range matches {
+		filtered = append(filtered, m.Items[match.Index])
 	}
 	return filtered
 }
 
-func matchesFilter(item CommitOption, query string) bool {
-	if strings.Contains(strings.ToLower(item.SHA), query) {
-		return true
-	}
-	if strings.Contains(strings.ToLower(item.ShortSHA), query) {
-		return true
-	}
-	if strings.Contains(strings.ToLower(item.Title), query) {
-		return true
-	}
-	for _, label := range item.Labels {
-		if strings.Contains(strings.ToLower(label), query) {
-			return true
-		}
-	}
-	if item.PRNumber > 0 && strings.HasPrefix(query, "#") {
-		return strings.Contains(strconv.Itoa(item.PRNumber), strings.TrimPrefix(query, "#"))
-	}
-	return false
+func searchableCommitOption(item CommitOption) string {
+	parts := []string{item.SHA, item.ShortSHA, item.Title, strconv.Itoa(item.PRNumber)}
+	parts = append(parts, item.Labels...)
+	return strings.Join(parts, " ")
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sahilm/fuzzy"
 
 	"patchflow/internal/browser"
 	"patchflow/internal/config"
@@ -42,47 +43,47 @@ type Model struct {
 	Browser    browser.Interface
 	Logger     logging.Logger
 
-	screen           string
-	history          []string
-	loading          bool
-	loadingMessage   string
-	loadingToken     int
-	Width            int
-	Height           int
-	spinner          spinner.Model
-	Remotes          []git.Remote
-	RemoteIndex      int
-	RemoteFilter     string
-	RefOptions       []string
-	RefIndex         int
-	RefFilter        string
-	CompareFrom      string
-	CompareTo        string
-	CompareToOptions []string
-	CompareToIndex   int
-	CompareToFilter  string
-	Commits          []git.Commit
-	CommitIndex      int
-	CommitFilter     string
-	CommitRangeAnchor int
-	CheckoutOptions  []string
-	CheckoutIndex    int
-	CheckoutFilter   string
-	CherryPickIndex  int
-	CherryPickCommit git.Commit
-	CherryPickErr    error
-	CherryPickValidationIndex int
+	screen                     string
+	history                    []string
+	loading                    bool
+	loadingMessage             string
+	loadingToken               int
+	Width                      int
+	Height                     int
+	spinner                    spinner.Model
+	Remotes                    []git.Remote
+	RemoteIndex                int
+	RemoteFilter               string
+	RefOptions                 []string
+	RefIndex                   int
+	RefFilter                  string
+	CompareFrom                string
+	CompareTo                  string
+	CompareToOptions           []string
+	CompareToIndex             int
+	CompareToFilter            string
+	Commits                    []git.Commit
+	CommitIndex                int
+	CommitFilter               string
+	CommitRangeAnchor          int
+	CheckoutOptions            []string
+	CheckoutIndex              int
+	CheckoutFilter             string
+	CherryPickIndex            int
+	CherryPickCommit           git.Commit
+	CherryPickErr              error
+	CherryPickValidationIndex  int
 	CherryPickValidationCommit git.Commit
 	CherryPickValidationErr    error
-	NewBranchName    string
-	NewBranchBase    string
-	NewBranchBaseFilter string
-	BranchName       string
-	PushRemote       string
-	TagName          string
-	ReleaseName      string
-	ReleaseNotesPath string
-	Err              error
+	NewBranchName              string
+	NewBranchBase              string
+	NewBranchBaseFilter        string
+	BranchName                 string
+	PushRemote                 string
+	TagName                    string
+	ReleaseName                string
+	ReleaseNotesPath           string
+	Err                        error
 }
 
 func New(opts Options) Model {
@@ -722,14 +723,24 @@ func (m Model) View() string {
 				[]string{"ctrl+c  quit"},
 			)
 		}
-		rows := make([]string, 0, len(m.Remotes))
-		for i, remote := range m.Remotes {
-			rows = append(rows, renderRow(i == m.RemoteIndex, fmt.Sprintf("  %s", remote.Name)))
+		filtered := filteredStringIndexes(m.remoteOptionNames(), m.RemoteFilter)
+		if len(filtered) == 0 {
+			return renderScreen(
+				"Select remote",
+				m.listSubtitle("Pick the remote to fetch before comparing refs.", m.RemoteFilter),
+				"No remotes match the current filter.",
+				[]string{"type  filter", "esc  clear", "ctrl+c  quit"},
+			)
+		}
+		rows := make([]string, 0, len(filtered))
+		focus := indexOfInt(filtered, m.RemoteIndex)
+		for pos, idx := range filtered {
+			rows = append(rows, renderRow(pos == focus, fmt.Sprintf("  %s", m.Remotes[idx].Name)))
 		}
 		return renderScreen(
 			"Select remote",
 			m.listSubtitle("Pick the remote to fetch before comparing refs.", m.RemoteFilter),
-			m.renderVisibleRows(rows, m.RemoteIndex),
+			m.renderVisibleRows(rows, focus),
 			[]string{"↑↓  move", "enter  continue", "type  filter", "ctrl+c  quit"},
 		)
 	case "ref_select":
@@ -741,14 +752,24 @@ func (m Model) View() string {
 				[]string{"ctrl+c  quit"},
 			)
 		}
-		rows := make([]string, 0, len(m.RefOptions))
-		for i, ref := range m.RefOptions {
-			rows = append(rows, renderRow(i == m.RefIndex, fmt.Sprintf("  %s", ref)))
+		filtered := filteredStringIndexes(m.RefOptions, m.RefFilter)
+		if len(filtered) == 0 {
+			return renderScreen(
+				"Select compare base",
+				m.listSubtitle(fmt.Sprintf("Remote: %s", m.selectedRemote()), m.RefFilter),
+				"No compare refs match the current filter.",
+				[]string{"type  filter", "esc  clear", "ctrl+c  quit"},
+			)
+		}
+		rows := make([]string, 0, len(filtered))
+		focus := indexOfInt(filtered, m.RefIndex)
+		for pos, idx := range filtered {
+			rows = append(rows, renderRow(pos == focus, fmt.Sprintf("  %s", m.RefOptions[idx])))
 		}
 		return renderScreen(
 			"Select compare base",
 			m.listSubtitle(fmt.Sprintf("Remote: %s", m.selectedRemote()), m.RefFilter),
-			m.renderVisibleRows(rows, m.RefIndex),
+			m.renderVisibleRows(rows, focus),
 			[]string{"↑↓  move", "enter  continue", "type  filter", "ctrl+c  quit"},
 		)
 	case "compare_to_select":
@@ -760,14 +781,24 @@ func (m Model) View() string {
 				[]string{"ctrl+c  quit"},
 			)
 		}
-		rows := make([]string, 0, len(m.CompareToOptions))
-		for i, target := range m.CompareToOptions {
-			rows = append(rows, renderRow(i == m.CompareToIndex, fmt.Sprintf("  %s", target)))
+		filtered := filteredStringIndexes(m.CompareToOptions, m.CompareToFilter)
+		if len(filtered) == 0 {
+			return renderScreen(
+				"Select compare target",
+				m.listSubtitle(fmt.Sprintf("Compare from: %s", m.CompareFrom), m.CompareToFilter),
+				"No compare targets match the current filter.",
+				[]string{"type  filter", "esc  clear", "ctrl+c  quit"},
+			)
+		}
+		rows := make([]string, 0, len(filtered))
+		focus := indexOfInt(filtered, m.CompareToIndex)
+		for pos, idx := range filtered {
+			rows = append(rows, renderRow(pos == focus, fmt.Sprintf("  %s", m.CompareToOptions[idx])))
 		}
 		return renderScreen(
 			"Select compare target",
 			m.listSubtitle(fmt.Sprintf("Compare from: %s", m.CompareFrom), m.CompareToFilter),
-			m.renderVisibleRows(rows, m.CompareToIndex),
+			m.renderVisibleRows(rows, focus),
 			[]string{"↑↓  move", "enter  continue", "type  filter", "ctrl+c  quit"},
 		)
 	case "commit_select":
@@ -789,14 +820,15 @@ func (m Model) View() string {
 			)
 		}
 		rows := make([]string, 0, len(filtered))
-		for _, idx := range filtered {
+		focus := indexOfInt(filtered, m.CommitIndex)
+		for pos, idx := range filtered {
 			commit := m.Commits[idx]
 			check := "☐"
 			if commit.Selected {
 				check = "☑"
 			}
 			line := fmt.Sprintf("%s %s %s%s%s", check, commit.ShortSHA, commit.Title, m.commitPRSuffix(commit), m.commitLabelSuffix(commit))
-			rows = append(rows, renderRow(idx == m.CommitIndex, "  "+line))
+			rows = append(rows, renderRow(pos == focus, "  "+line))
 		}
 		filterText := "Filter: (off)"
 		if strings.TrimSpace(m.CommitFilter) != "" {
@@ -805,7 +837,7 @@ func (m Model) View() string {
 		return renderScreen(
 			"Select commits",
 			fmt.Sprintf("Selected: %d/%d\n%s", m.selectedCommitCount(), len(m.Commits), filterText),
-			m.renderVisibleRows(rows, m.CommitIndex),
+			m.renderVisibleRows(rows, focus),
 			[]string{"space  toggle", "ctrl+a  all", "ctrl+d  none", "shift+↑/↓  range", "ctrl+enter  open PR", "type  filter", "enter  continue", "ctrl+c  quit"},
 		)
 	case "checkout_select":
@@ -817,15 +849,21 @@ func (m Model) View() string {
 				[]string{"ctrl+c  quit"},
 			)
 		}
-		rows := make([]string, 0, len(m.CheckoutOptions)+1)
-		for i, option := range m.CheckoutOptions {
-			rows = append(rows, renderRow(i == m.CheckoutIndex, fmt.Sprintf("  %s", option)))
+		filtered := filteredStringIndexes(m.CheckoutOptions, m.CheckoutFilter)
+		rows := make([]string, 0, len(filtered)+1)
+		focus := indexOfInt(filtered, m.CheckoutIndex)
+		for pos, idx := range filtered {
+			rows = append(rows, renderRow(pos == focus, fmt.Sprintf("  %s", m.CheckoutOptions[idx])))
 		}
-		rows = append(rows, renderRow(m.CheckoutIndex == len(m.CheckoutOptions), fmt.Sprintf("  %s", createNewBranchOption)))
+		specialFocus := m.CheckoutIndex == len(m.CheckoutOptions)
+		rows = append(rows, renderRow(specialFocus, fmt.Sprintf("  %s", createNewBranchOption)))
+		if specialFocus {
+			focus = len(rows) - 1
+		}
 		return renderScreen(
 			"Select checkout target",
 			m.listSubtitle("Choose the branch or tag to apply commits on.", m.CheckoutFilter),
-			m.renderVisibleRows(rows, m.CheckoutIndex),
+			m.renderVisibleRows(rows, focus),
 			[]string{"↑↓  move", "enter  checkout", "type  filter", "ctrl+c  quit"},
 		)
 	case "new_branch_base_select":
@@ -837,14 +875,24 @@ func (m Model) View() string {
 				[]string{"ctrl+c  quit"},
 			)
 		}
-		rows := make([]string, 0, len(m.CheckoutOptions))
-		for i, option := range m.CheckoutOptions {
-			rows = append(rows, renderRow(i == m.CheckoutIndex, fmt.Sprintf("  %s", option)))
+		filtered := filteredStringIndexes(m.CheckoutOptions, m.NewBranchBaseFilter)
+		if len(filtered) == 0 {
+			return renderScreen(
+				"Select new branch base",
+				m.listSubtitle("Pick the branch or tag to branch from.", m.NewBranchBaseFilter),
+				"No branch or tag bases match the current filter.",
+				[]string{"esc  back", "type  filter", "ctrl+c  quit"},
+			)
+		}
+		rows := make([]string, 0, len(filtered))
+		focus := indexOfInt(filtered, m.CheckoutIndex)
+		for pos, idx := range filtered {
+			rows = append(rows, renderRow(pos == focus, fmt.Sprintf("  %s", m.CheckoutOptions[idx])))
 		}
 		return renderScreen(
 			"Select new branch base",
 			m.listSubtitle("Pick the branch or tag to branch from.", m.NewBranchBaseFilter),
-			m.renderVisibleRows(rows, m.CheckoutIndex),
+			m.renderVisibleRows(rows, focus),
 			[]string{"↑↓  move", "enter  continue", "esc  back", "type  filter", "ctrl+c  quit"},
 		)
 	case "new_branch_name_select":
@@ -1184,12 +1232,12 @@ func (m Model) applySelectedCommitsCmd(token int, startSelectedIndex int) tea.Cm
 			}
 			commits[i].Status = "applied"
 			commits[i].Selected = false
-				if strings.TrimSpace(m.Config.PostCherryPickCmd) != "" {
-					if err := runShellCommand(context.Background(), m.Git.Runner, m.Logger, m.WorkDir, m.Config.PostCherryPickCmd); err != nil {
-						return cherryPickValidationMsg{
-							token:  token,
-							index:  selectedIndex,
-							commit: commits[i],
+			if strings.TrimSpace(m.Config.PostCherryPickCmd) != "" {
+				if err := runShellCommand(context.Background(), m.Git.Runner, m.Logger, m.WorkDir, m.Config.PostCherryPickCmd); err != nil {
+					return cherryPickValidationMsg{
+						token:  token,
+						index:  selectedIndex,
+						commit: commits[i],
 						err:    err,
 					}
 				}
@@ -1447,10 +1495,15 @@ func (m Model) renderVisibleRows(rows []string, focus int) string {
 func filteredStringIndexes(items []string, query string) []int {
 	query = strings.ToLower(strings.TrimSpace(query))
 	indexes := make([]int, 0, len(items))
-	for i, item := range items {
-		if query == "" || strings.Contains(strings.ToLower(item), query) {
+	if query == "" {
+		for i := range items {
 			indexes = append(indexes, i)
 		}
+		return indexes
+	}
+	matches := fuzzy.Find(query, items)
+	for _, match := range matches {
+		indexes = append(indexes, match.Index)
 	}
 	return indexes
 }
@@ -1522,36 +1575,30 @@ func ensureCheckoutIndexMove(m *Model, delta int) int {
 func (m Model) filteredCommitIndexes() []int {
 	query := strings.ToLower(strings.TrimSpace(m.CommitFilter))
 	indexes := make([]int, 0, len(m.Commits))
-	for i, commit := range m.Commits {
-		if query == "" || commitMatchesFilter(commit, query) {
+	if query == "" {
+		for i := range m.Commits {
 			indexes = append(indexes, i)
 		}
+		return indexes
+	}
+	labels := make([]string, 0, len(m.Commits))
+	for _, commit := range m.Commits {
+		labels = append(labels, searchableCommit(commit))
+	}
+	matches := fuzzy.Find(query, labels)
+	for _, match := range matches {
+		indexes = append(indexes, match.Index)
 	}
 	return indexes
 }
 
-func commitMatchesFilter(commit git.Commit, query string) bool {
-	if query == "" {
-		return true
-	}
-	if strings.Contains(strings.ToLower(commit.SHA), query) || strings.Contains(strings.ToLower(commit.ShortSHA), query) || strings.Contains(strings.ToLower(commit.Title), query) {
-		return true
-	}
-	if strings.Contains(strings.ToLower(commit.PRTitle), query) {
-		return true
-	}
-	for _, label := range commit.Labels {
-		if strings.Contains(strings.ToLower(label), query) {
-			return true
-		}
-	}
+func searchableCommit(commit git.Commit) string {
+	parts := []string{commit.SHA, commit.ShortSHA, commit.Title, commit.PRTitle}
 	if commit.PRNumber > 0 {
-		number := fmt.Sprintf("%d", commit.PRNumber)
-		if strings.Contains(number, strings.TrimPrefix(query, "#")) {
-			return true
-		}
+		parts = append(parts, fmt.Sprintf("%d", commit.PRNumber))
 	}
-	return false
+	parts = append(parts, commit.Labels...)
+	return strings.Join(parts, " ")
 }
 
 func (m *Model) ensureVisibleCommitFocus() {
