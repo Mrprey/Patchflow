@@ -702,9 +702,9 @@ func TestVersioningKeysAndContinue(t *testing.T) {
 func TestPushTagAndReleaseFlow(t *testing.T) {
 	runner := &recordingRunner{outputs: map[string]string{
 		"git push origin release/1.2.1": "",
-		"git tag -a v1.2.1 -m v1.2.1":   "",
-		"git push origin v1.2.1":        "",
-		"gh release create v1.2.1 --target release/1.2.1 --title v1.2.1 --notes-file /tmp/repo/.patchflow/release-notes.md --draft": "",
+		"git tag -a v1.2.2 -m v1.2.2":   "",
+		"git push origin v1.2.2":        "",
+		"gh release create v1.2.2 --target release/1.2.1 --title v1.2.2-rc1 --notes-file /tmp/repo/.patchflow/release-notes.md --draft": "",
 	}}
 	m := New(Options{
 		WorkDir: "/tmp/repo",
@@ -726,10 +726,33 @@ func TestPushTagAndReleaseFlow(t *testing.T) {
 		t.Fatalf("ScreenName() = %q, want tag_select", got.ScreenName())
 	}
 
+	next, _ = got.Update(keyMsgBackspace())
+	got = next.(Model)
+	if got.TagName != "v1.2." {
+		t.Fatalf("TagName = %q, want v1.2.", got.TagName)
+	}
+	next, _ = got.Update(keyMsgRune("2"))
+	got = next.(Model)
+	if got.TagName != "v1.2.2" {
+		t.Fatalf("TagName = %q, want v1.2.2", got.TagName)
+	}
+
 	next, _ = got.Update(keyMsgEnter())
 	got = next.(Model)
 	if got.ScreenName() != "release_select" {
 		t.Fatalf("ScreenName() = %q, want release_select", got.ScreenName())
+	}
+	if got.TagName != "v1.2.2" {
+		t.Fatalf("TagName = %q, want v1.2.2", got.TagName)
+	}
+	if got.ReleaseName != "v1.2.2" {
+		t.Fatalf("ReleaseName = %q, want v1.2.2", got.ReleaseName)
+	}
+
+	next, _ = got.Update(keyMsgRune("-rc1"))
+	got = next.(Model)
+	if got.ReleaseName != "v1.2.2-rc1" {
+		t.Fatalf("ReleaseName = %q, want v1.2.2-rc1", got.ReleaseName)
 	}
 
 	next, _ = got.Update(keyMsgEnter())
@@ -765,6 +788,10 @@ func keyMsgCtrlD() tea.KeyMsg {
 
 func keyMsgEsc() tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyEsc}
+}
+
+func keyMsgBackspace() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyBackspace}
 }
 
 func keyMsgCtrlEnter() tea.KeyMsg {

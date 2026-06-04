@@ -63,6 +63,7 @@ type Model struct {
 	BranchName       string
 	PushRemote       string
 	TagName          string
+	ReleaseName      string
 	ReleaseNotesPath string
 	Err              error
 }
@@ -347,6 +348,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.Err = nil
+				if strings.TrimSpace(m.TagName) == "" {
+					m.TagName = "v1.2.1"
+				}
+				m.ReleaseName = m.TagName
 				m.setScreen("tag_select")
 				return m, nil
 			}
@@ -356,6 +361,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.Err = nil
+				m.ReleaseName = m.TagName
 				m.setScreen("release_select")
 				return m, nil
 			}
@@ -427,6 +433,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for i := range m.Commits {
 					m.Commits[i].Selected = false
 				}
+			}
+		case tea.KeyBackspace, tea.KeyDelete:
+			if m.screen == "tag_select" {
+				m.TagName = deleteLastRune(m.TagName)
+				return m, nil
+			}
+			if m.screen == "release_select" {
+				m.ReleaseName = deleteLastRune(m.ReleaseName)
+				return m, nil
 			}
 		case tea.KeyRunes:
 			switch msg.String() {
@@ -504,6 +519,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, nil
 				}
+			}
+			if m.screen == "tag_select" {
+				m.TagName += msg.String()
+				return m, nil
+			}
+			if m.screen == "release_select" {
+				m.ReleaseName += msg.String()
+				return m, nil
 			}
 		default:
 			if msg.String() == "q" {
@@ -656,15 +679,15 @@ func (m Model) View() string {
 		return renderScreen(
 			"Tag",
 			"Create and push the release tag.",
-			"Press enter to create the annotated tag.",
-			[]string{"enter  tag", "esc  back", "q  quit"},
+			fmt.Sprintf("Tag name: %s\n\nType to edit the tag name, then press enter.", m.TagName),
+			[]string{"type  edit", "backspace  delete", "enter  tag", "esc  back", "q  quit"},
 		)
 	case "release_select":
 		return renderScreen(
 			"Release",
 			"Generate release notes and create the GitHub draft.",
-			"Press enter to write notes and publish the draft release.",
-			[]string{"enter  release", "esc  back", "q  quit"},
+			fmt.Sprintf("Release title: %s\nTag: %s\n\nType to edit the release title, then press enter.", m.releaseTitle(), m.TagName),
+			[]string{"type  edit", "backspace  delete", "enter  release", "esc  back", "q  quit"},
 		)
 	case "done":
 		return renderScreen(
@@ -1003,6 +1026,9 @@ func (m *Model) handleReleaseEnter() error {
 	if m.TagName == "" {
 		m.TagName = "v1.2.1"
 	}
+	if strings.TrimSpace(m.ReleaseName) == "" {
+		m.ReleaseName = m.TagName
+	}
 	if m.ReleaseNotesPath == "" {
 		m.ReleaseNotesPath = ".patchflow/release-notes.md"
 	}
@@ -1017,8 +1043,29 @@ func (m *Model) handleReleaseEnter() error {
 	if branch == "" {
 		branch = m.selectedCheckoutOption()
 	}
-	_, err := m.runLogged(context.Background(), "gh", "release", "create", m.TagName, "--target", branch, "--title", m.TagName, "--notes-file", m.ReleaseNotesPath, "--draft")
+	_, err := m.runLogged(context.Background(), "gh", "release", "create", m.TagName, "--target", branch, "--title", m.ReleaseName, "--notes-file", m.ReleaseNotesPath, "--draft")
 	return err
+}
+
+func (m Model) releaseTitle() string {
+	if strings.TrimSpace(m.ReleaseName) != "" {
+		return m.ReleaseName
+	}
+	if strings.TrimSpace(m.TagName) != "" {
+		return m.TagName
+	}
+	return "v1.2.1"
+}
+
+func deleteLastRune(value string) string {
+	if value == "" {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) == 0 {
+		return ""
+	}
+	return string(runes[:len(runes)-1])
 }
 
 func (m Model) releaseNotes() string {
@@ -1090,6 +1137,8 @@ func (m Model) saveState() error {
 	state := stateSnapshot{
 		CurrentStep:     m.screen,
 		CurrentCommit:   m.currentCommitSHA(),
+		TagName:         m.TagName,
+		ReleaseName:     m.ReleaseName,
 		SelectedCommits: m.selectedStateCommits(),
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -1110,6 +1159,8 @@ func (m Model) resolveStatePath() string {
 type stateSnapshot struct {
 	CurrentStep     string        `json:"currentStep"`
 	CurrentCommit   string        `json:"currentCommit"`
+	TagName         string        `json:"tagName,omitempty"`
+	ReleaseName     string        `json:"releaseName,omitempty"`
 	SelectedCommits []stateCommit `json:"selectedCommits"`
 }
 

@@ -1,0 +1,7 @@
+$ git checkout v1.2.1
+error: Your local changes to the following files would be overwritten by checkout:
+	.patchflow/state.json
+	internal/tui/model_test.go
+Please commit your changes or stash them before you switch branches.
+Aborting
+
